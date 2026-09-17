@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { startOfDayInTZ, startOfYearInTZ } from "@/lib/tz";
+import { startOfDayInTZ, startOfYearInTZ, localDateStringToUTC } from "@/lib/tz";
 import {
   getKpis,
   getTimeseries,
@@ -13,8 +13,15 @@ export const dynamic = "force-dynamic";
 
 function rangeBounds(rangeKey: string, startParam: string | null, endParam: string | null) {
   const now = new Date();
+
   if (rangeKey === "custom" && startParam && endParam) {
-    return { start: startParam, end: endParam };
+    // startParam/endParam are plain "YYYY-MM-DD" strings from a date
+    // picker - both endpoints are INCLUSIVE calendar days in Central
+    // time, so "end" becomes the start of the day AFTER the picked date.
+    const start = localDateStringToUTC(startParam);
+    const endDayStart = localDateStringToUTC(endParam);
+    const end = new Date(endDayStart.getTime() + 24 * 3600 * 1000);
+    return { start: start.toISOString(), end: end.toISOString() };
   }
 
   let start: Date;
@@ -60,7 +67,16 @@ export async function GET(req: NextRequest) {
     req.nextUrl.searchParams.get("start"),
     req.nextUrl.searchParams.get("end")
   );
-  const granularity = req.nextUrl.searchParams.get("granularity") ?? granularityFor(rangeKey);
+
+  let granularity = req.nextUrl.searchParams.get("granularity");
+  if (!granularity) {
+    if (rangeKey === "custom") {
+      const spanDays = (new Date(end).getTime() - new Date(start).getTime()) / (24 * 3600 * 1000);
+      granularity = spanDays <= 1 ? "hour" : spanDays <= 90 ? "day" : "month";
+    } else {
+      granularity = granularityFor(rangeKey);
+    }
+  }
 
   const [kpis, timeseries, fuelByGrade, merch, paymentMix, pumpActivity] = await Promise.all([
     getKpis(start, end),
