@@ -101,43 +101,111 @@ export async function markFileProcessed(filename: string, hash: string, txnCount
 }
 
 export async function ingestTransactions(transactions: Transaction[]): Promise<number> {
+  if (transactions.length === 0) return 0;
   const db = sql();
-  let newCount = 0;
 
-  for (const txn of transactions) {
-    const inserted = await db`
-      INSERT INTO transactions
-        (unique_id, source_file, trans_type, pos_num, date, cashier, till,
-         total_no_tax, total_with_tax, total_tax)
-      VALUES
-        (${txn.unique_id}, ${txn.source_file}, ${txn.trans_type}, ${txn.pos_num},
-         ${txn.date}, ${txn.cashier}, ${txn.till},
-         ${txn.total_no_tax}, ${txn.total_with_tax}, ${txn.total_tax})
-      ON CONFLICT (unique_id) DO NOTHING
-      RETURNING unique_id
-    `;
-    if (inserted.length === 0) continue; // already had this one - skip lines/payments too
-    newCount++;
+  // Step 1: find which of these unique_ids we already have, in ONE query,
+  // instead of relying on a per-row INSERT...ON CONFLICT round-trip each.
+  const allIds = transactions.map((t) => t.unique_id);
+  const existing = await db.query(
+    `SELECT unique_id FROM transactions WHERE unique_id = ANY($1::text[])`,
+    [allIds]
+  );
+  const existingSet = new Set((existing as any[]).map((r) => r.unique_id));
+  const newTxns = transactions.filter((t) => !existingSet.has(t.unique_id));
+  if (newTxns.length === 0) return 0;
 
+  // Step 2: bulk-insert all new transactions in ONE query via unnest().
+  await db.query(
+    `INSERT INTO transactions
+       (unique_id, source_file, trans_type, pos_num, date, cashier, till,
+        total_no_tax, total_with_tax, total_tax)
+     SELECT * FROM unnest(
+       $1::text[], $2::text[], $3::text[], $4::int[], $5::timestamptz[],
+       $6::text[], $7::int[], $8::numeric[], $9::numeric[], $10::numeric[]
+     )
+     ON CONFLICT (unique_id) DO NOTHING`,
+    [
+      newTxns.map((t) => t.unique_id),
+      newTxns.map((t) => t.source_file),
+      newTxns.map((t) => t.trans_type),
+      newTxns.map((t) => t.pos_num),
+      newTxns.map((t) => t.date),
+      newTxns.map((t) => t.cashier),
+      newTxns.map((t) => t.till),
+      newTxns.map((t) => t.total_no_tax),
+      newTxns.map((t) => t.total_with_tax),
+      newTxns.map((t) => t.total_tax),
+    ]
+  );
+
+  // Step 3: flatten every line item across ALL new transactions into
+  // parallel arrays, and bulk-insert them in ONE query.
+  const lineOwners: string[] = [];
+  const lineDeptNum: (string | null)[] = [];
+  const lineDeptType: (string | null)[] = [];
+  const lineDesc: (string | null)[] = [];
+  const lineQty: (number | null)[] = [];
+  const lineUnitPrice: (number | null)[] = [];
+  const lineTotal: (number | null)[] = [];
+  const lineIsFuel: boolean[] = [];
+  const lineFuelGrade: (string | null)[] = [];
+  const lineFuelVolume: (number | null)[] = [];
+  const linePumpNumber: (number | null)[] = [];
+
+  for (const txn of newTxns) {
     for (const line of txn.lines) {
-      await db`
-        INSERT INTO transaction_lines
-          (unique_id, dept_number, dept_type, description, qty, unit_price,
-           line_total, is_fuel, fuel_grade, fuel_volume, pump_number)
-        VALUES
-          (${txn.unique_id}, ${line.dept_number}, ${line.dept_type}, ${line.description},
-           ${line.qty}, ${line.unit_price}, ${line.line_total}, ${line.is_fuel},
-           ${line.fuel_grade}, ${line.fuel_volume}, ${line.pump_number})
-      `;
-    }
-    for (const pay of txn.payments) {
-      await db`
-        INSERT INTO transaction_payments (unique_id, tender_type, amount, card_last4)
-        VALUES (${txn.unique_id}, ${pay.tender_type}, ${pay.amount}, ${pay.card_last4})
-      `;
+      lineOwners.push(txn.unique_id);
+      lineDeptNum.push(line.dept_number);
+      lineDeptType.push(line.dept_type);
+      lineDesc.push(line.description);
+      lineQty.push(line.qty);
+      lineUnitPrice.push(line.unit_price);
+      lineTotal.push(line.line_total);
+      lineIsFuel.push(line.is_fuel);
+      lineFuelGrade.push(line.fuel_grade);
+      lineFuelVolume.push(line.fuel_volume);
+      linePumpNumber.push(line.pump_number);
     }
   }
-  return newCount;
+  if (lineOwners.length > 0) {
+    await db.query(
+      `INSERT INTO transaction_lines
+         (unique_id, dept_number, dept_type, description, qty, unit_price,
+          line_total, is_fuel, fuel_grade, fuel_volume, pump_number)
+       SELECT * FROM unnest(
+         $1::text[], $2::text[], $3::text[], $4::text[], $5::numeric[],
+         $6::numeric[], $7::numeric[], $8::boolean[], $9::text[], $10::numeric[], $11::int[]
+       )`,
+      [
+        lineOwners, lineDeptNum, lineDeptType, lineDesc, lineQty,
+        lineUnitPrice, lineTotal, lineIsFuel, lineFuelGrade, lineFuelVolume, linePumpNumber,
+      ]
+    );
+  }
+
+  // Step 4: same bulk approach for payments.
+  const payOwners: string[] = [];
+  const payTender: string[] = [];
+  const payAmount: (number | null)[] = [];
+  const payCard: (string | null)[] = [];
+  for (const txn of newTxns) {
+    for (const pay of txn.payments) {
+      payOwners.push(txn.unique_id);
+      payTender.push(pay.tender_type);
+      payAmount.push(pay.amount);
+      payCard.push(pay.card_last4);
+    }
+  }
+  if (payOwners.length > 0) {
+    await db.query(
+      `INSERT INTO transaction_payments (unique_id, tender_type, amount, card_last4)
+       SELECT * FROM unnest($1::text[], $2::text[], $3::numeric[], $4::text[])`,
+      [payOwners, payTender, payAmount, payCard]
+    );
+  }
+
+  return newTxns.length;
 }
 
 // ── Dashboard queries ──────────────────────────────────────
