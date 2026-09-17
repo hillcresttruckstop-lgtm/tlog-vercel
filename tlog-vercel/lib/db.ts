@@ -261,10 +261,10 @@ export async function getKpis(start: string, end: string) {
 }
 
 const BUCKET_EXPR: Record<string, string> = {
-  hour: "to_char(date, 'YYYY-MM-DD\"T\"HH24:00')",
-  day: "to_char(date, 'YYYY-MM-DD')",
-  month: "to_char(date, 'YYYY-MM')",
-  year: "to_char(date, 'YYYY')",
+  hour: `to_char(date AT TIME ZONE 'America/Chicago', 'YYYY-MM-DD"T"HH24:00')`,
+  day: `to_char(date AT TIME ZONE 'America/Chicago', 'YYYY-MM-DD')`,
+  month: `to_char(date AT TIME ZONE 'America/Chicago', 'YYYY-MM')`,
+  year: `to_char(date AT TIME ZONE 'America/Chicago', 'YYYY')`,
 };
 
 export async function getTimeseries(granularity: string, start: string, end: string) {
