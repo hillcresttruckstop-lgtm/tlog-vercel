@@ -300,3 +300,18 @@ main { padding: 20px 28px 40px; display: flex; flex-direction: column; gap: 18px
   .panel { border: 1px solid #ccc !important; break-inside: avoid; }
   .kpi-value { color: black !important; }
 }
+
+/* ── Feed type/payment filter dropdowns ─────────────────── */
+
+.feed-filter-select {
+  background: #0A1220;
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  padding: 6px 8px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  flex: 1;
+}
+.feed-filter-select:focus { border-color: var(--amber); }

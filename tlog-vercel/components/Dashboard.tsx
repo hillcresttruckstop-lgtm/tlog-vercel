@@ -102,6 +102,8 @@ function feedDescription(item: FeedItem) {
 function feedSearchText(item: FeedItem) {
   return [
     item.cashier,
+    item.trans_type,
+    item.total_with_tax != null ? item.total_with_tax.toFixed(2) : null,
     ...item.lines.map((l) => l.description),
     ...item.lines.map((l) => l.fuel_grade),
     ...item.lines.map((l) => (l.pump_number ? `pump ${l.pump_number}` : null)),
@@ -110,6 +112,10 @@ function feedSearchText(item: FeedItem) {
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
+}
+
+function feedType(item: FeedItem): "fuel" | "merch" {
+  return item.lines.some((l) => l.is_fuel) ? "fuel" : "merch";
 }
 
 function DeltaBadge({ pct }: { pct: number | null }) {
@@ -140,6 +146,8 @@ export default function Dashboard() {
   const [status, setStatus] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [paymentFilter, setPaymentFilter] = useState("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [secondsLeft, setSecondsLeft] = useState(REFRESH_MS / 1000);
   const [ledgerSort, setLedgerSort] = useState<{ col: string; dir: "asc" | "desc" }>({
@@ -194,10 +202,23 @@ export default function Dashboard() {
   const avgTicket = kpis?.txn_count ? kpis.revenue / kpis.txn_count : 0;
 
   const filteredFeed = useMemo(() => {
-    if (!search.trim()) return feed;
-    const q = search.trim().toLowerCase();
-    return feed.filter((item) => feedSearchText(item).includes(q));
-  }, [feed, search]);
+    let rows = feed;
+    if (typeFilter !== "all") rows = rows.filter((item) => feedType(item) === typeFilter);
+    if (paymentFilter !== "all") {
+      rows = rows.filter((item) => item.payments.some((p) => p.tender_type === paymentFilter));
+    }
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      rows = rows.filter((item) => feedSearchText(item).includes(q));
+    }
+    return rows;
+  }, [feed, search, typeFilter, paymentFilter]);
+
+  const paymentTypes = useMemo(() => {
+    const set = new Set<string>();
+    for (const item of feed) for (const p of item.payments) if (p.tender_type !== "Change") set.add(p.tender_type);
+    return Array.from(set).sort();
+  }, [feed]);
 
   const sortedLedger = useMemo(() => {
     const rows: any[] = insights?.daily_ledger ?? [];
@@ -396,10 +417,45 @@ export default function Dashboard() {
             </div>
             <input
               className="feed-search"
-              placeholder="Search by item, pump, cashier, or payment type…"
+              placeholder="Search anything — item, grade, pump, cashier, amount, payment…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
+            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+              <select
+                className="feed-filter-select"
+                value={typeFilter}
+                onChange={(e) => setTypeFilter(e.target.value)}
+              >
+                <option value="all">All types</option>
+                <option value="fuel">Fuel only</option>
+                <option value="merch">Merchandise only</option>
+              </select>
+              <select
+                className="feed-filter-select"
+                value={paymentFilter}
+                onChange={(e) => setPaymentFilter(e.target.value)}
+              >
+                <option value="all">All payment types</option>
+                {paymentTypes.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+              {(typeFilter !== "all" || paymentFilter !== "all" || search) && (
+                <button
+                  className="export-btn"
+                  onClick={() => {
+                    setTypeFilter("all");
+                    setPaymentFilter("all");
+                    setSearch("");
+                  }}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
             <div className="feed">
               {filteredFeed.length === 0 && (
                 <div className="empty-note">{feed.length === 0 ? "No transactions yet." : "No matches."}</div>
