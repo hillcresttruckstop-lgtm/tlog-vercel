@@ -114,6 +114,9 @@ function feedSearchText(item: FeedItem) {
 
 export default function Dashboard() {
   const [range, setRange] = useState("today");
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const [customStart, setCustomStart] = useState(todayStr);
+  const [customEnd, setCustomEnd] = useState(todayStr);
   const [summary, setSummary] = useState<any>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [status, setStatus] = useState<any>(null);
@@ -126,8 +129,12 @@ export default function Dashboard() {
 
   const refresh = useCallback(async () => {
     try {
+      const summaryUrl =
+        range === "custom"
+          ? `/api/summary?range=custom&start=${customStart}&end=${customEnd}`
+          : `/api/summary?range=${range}`;
       const [summaryRes, feedRes, statusRes] = await Promise.all([
-        fetch(`/api/summary?range=${range}`).then((r) => r.json()),
+        fetch(summaryUrl).then((r) => r.json()),
         fetch(`/api/live-feed?limit=60`).then((r) => r.json()),
         fetch(`/api/status`).then((r) => r.json()),
       ]);
@@ -139,7 +146,7 @@ export default function Dashboard() {
     } catch {
       setError("connection error — retrying…");
     }
-  }, [range]);
+  }, [range, customStart, customEnd]);
 
   useEffect(() => {
     refresh();
@@ -229,6 +236,34 @@ export default function Dashboard() {
             {r.label}
           </button>
         ))}
+        <button className={range === "custom" ? "active" : ""} onClick={() => setRange("custom")}>
+          Custom
+        </button>
+        {range === "custom" && (
+          <span style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: 6 }}>
+            <input
+              type="date"
+              value={customStart}
+              max={customEnd}
+              onChange={(e) => setCustomStart(e.target.value)}
+              className="feed-search"
+              style={{ marginBottom: 0, width: "auto", padding: "6px 8px" }}
+            />
+            <span style={{ color: "var(--text-faint)", fontSize: 12 }}>to</span>
+            <input
+              type="date"
+              value={customEnd}
+              min={customStart}
+              max={todayStr}
+              onChange={(e) => setCustomEnd(e.target.value)}
+              className="feed-search"
+              style={{ marginBottom: 0, width: "auto", padding: "6px 8px" }}
+            />
+            <button onClick={refresh} style={{ padding: "7px 14px" }}>
+              Apply
+            </button>
+          </span>
+        )}
       </nav>
 
       <main>
