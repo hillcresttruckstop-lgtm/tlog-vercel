@@ -52,3 +52,14 @@ export function startOfYearInTZ(date: Date, timeZone: string = STORE_TZ): Date {
   const offsetMin = getOffsetMinutes(naiveUTC, timeZone);
   return new Date(naiveUTC - offsetMin * 60000);
 }
+
+/** Converts a plain "YYYY-MM-DD" string (e.g. from an HTML date picker)
+ * into the real UTC instant for local midnight on THAT exact calendar
+ * date in `timeZone` - not the date as seen from some other anchor
+ * instant, the literal Y-M-D the person picked. */
+export function localDateStringToUTC(dateStr: string, timeZone: string = STORE_TZ): Date {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const naiveUTC = Date.UTC(y, m - 1, d, 0, 0, 0);
+  const offsetMin = getOffsetMinutes(naiveUTC, timeZone);
+  return new Date(naiveUTC - offsetMin * 60000);
+}
