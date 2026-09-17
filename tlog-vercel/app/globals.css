@@ -212,3 +212,91 @@ main { padding: 20px 28px 40px; display: flex; flex-direction: column; gap: 18px
   margin: 0 auto 4px;
   display: block;
 }
+
+/* ── KPI row: now 5 tiles, plus comparison deltas ───────── */
+
+.kpi-row { grid-template-columns: repeat(5, 1fr); }
+@media (max-width: 1200px) { .kpi-row { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 700px) { .kpi-row { grid-template-columns: repeat(2, 1fr); } }
+
+.kpi-delta { font-size: 11px; margin-top: 4px; font-family: 'IBM Plex Mono', monospace; }
+.kpi-delta.up { color: var(--up); }
+.kpi-delta.down { color: var(--rose); }
+.kpi-delta.flat { color: var(--text-faint); }
+
+/* ── Highlights callout ──────────────────────────────────── */
+
+.highlights-bar {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  padding: 2px 2px 0;
+}
+.highlights-bar strong { color: var(--amber); font-weight: 600; }
+
+/* ── Pump health warning ─────────────────────────────────── */
+
+.pump-warning {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(226, 99, 122, 0.1);
+  border: 1px solid rgba(226, 99, 122, 0.35);
+  color: var(--rose);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-size: 12.5px;
+}
+
+/* ── Sortable ledger table ──────────────────────────────── */
+
+.sortable-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.sortable-table th {
+  text-align: left;
+  color: var(--text-faint);
+  font-weight: 500;
+  font-size: 11px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--panel-border);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.sortable-table th:hover { color: var(--text-dim); }
+.sortable-table th.sorted { color: var(--amber); }
+.sortable-table td {
+  padding: 8px 8px;
+  border-bottom: 1px solid var(--panel-border);
+  color: var(--text);
+  font-family: 'IBM Plex Mono', monospace;
+}
+.sortable-table td:first-child { font-family: 'Inter', sans-serif; }
+.sortable-table tr:last-child td { border-bottom: none; }
+.sortable-table tr:hover td { background: rgba(255,255,255,0.02); }
+
+/* ── Print button ────────────────────────────────────────── */
+
+.print-btn {
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  color: var(--text-dim);
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+  margin-left: 8px;
+}
+.print-btn:hover { color: var(--amber); border-color: rgba(232,163,61,0.5); }
+
+/* ── Print stylesheet ────────────────────────────────────── */
+
+@media print {
+  .topbar .status, .range-tabs, .feed-search, .export-btn, .print-btn,
+  .panel-feed, .pulse-dot { display: none !important; }
+  body, .panel { background: white !important; color: black !important; }
+  .panel { border: 1px solid #ccc !important; break-inside: avoid; }
+  .kpi-value { color: black !important; }
+}

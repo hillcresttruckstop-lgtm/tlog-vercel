@@ -112,33 +112,55 @@ function feedSearchText(item: FeedItem) {
     .toLowerCase();
 }
 
+function DeltaBadge({ pct }: { pct: number | null }) {
+  if (pct === null) return null;
+  const rounded = Math.round(pct * 10) / 10;
+  const cls = rounded > 0.5 ? "up" : rounded < -0.5 ? "down" : "flat";
+  const arrow = rounded > 0.5 ? "▲" : rounded < -0.5 ? "▼" : "–";
+  return (
+    <div className={`kpi-delta ${cls}`}>
+      {arrow} {Math.abs(rounded)}% vs prev. period
+    </div>
+  );
+}
+
+function hourLabel(hour: number) {
+  const h = hour % 12 === 0 ? 12 : hour % 12;
+  return `${h}${hour < 12 ? "a" : "p"}`;
+}
+
 export default function Dashboard() {
   const [range, setRange] = useState("today");
   const todayStr = new Date().toISOString().slice(0, 10);
   const [customStart, setCustomStart] = useState(todayStr);
   const [customEnd, setCustomEnd] = useState(todayStr);
   const [summary, setSummary] = useState<any>(null);
+  const [insights, setInsights] = useState<any>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [status, setStatus] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [secondsLeft, setSecondsLeft] = useState(REFRESH_MS / 1000);
+  const [ledgerSort, setLedgerSort] = useState<{ col: string; dir: "asc" | "desc" }>({
+    col: "day",
+    dir: "desc",
+  });
   const knownIds = useRef<Set<string>>(new Set());
   const firstLoad = useRef(true);
 
   const refresh = useCallback(async () => {
     try {
-      const summaryUrl =
-        range === "custom"
-          ? `/api/summary?range=custom&start=${customStart}&end=${customEnd}`
-          : `/api/summary?range=${range}`;
-      const [summaryRes, feedRes, statusRes] = await Promise.all([
-        fetch(summaryUrl).then((r) => r.json()),
+      const rangeQuery =
+        range === "custom" ? `range=custom&start=${customStart}&end=${customEnd}` : `range=${range}`;
+      const [summaryRes, insightsRes, feedRes, statusRes] = await Promise.all([
+        fetch(`/api/summary?${rangeQuery}`).then((r) => r.json()),
+        fetch(`/api/insights?${rangeQuery}`).then((r) => r.json()),
         fetch(`/api/live-feed?limit=60`).then((r) => r.json()),
         fetch(`/api/status`).then((r) => r.json()),
       ]);
       setSummary(summaryRes);
+      setInsights(insightsRes);
       setFeed(feedRes);
       setStatus(statusRes);
       setError(null);
@@ -176,6 +198,24 @@ export default function Dashboard() {
     const q = search.trim().toLowerCase();
     return feed.filter((item) => feedSearchText(item).includes(q));
   }, [feed, search]);
+
+  const sortedLedger = useMemo(() => {
+    const rows: any[] = insights?.daily_ledger ?? [];
+    const { col, dir } = ledgerSort;
+    const sorted = [...rows].sort((a, b) => {
+      const av = a[col];
+      const bv = b[col];
+      if (typeof av === "string") return dir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+      return dir === "asc" ? av - bv : bv - av;
+    });
+    return sorted;
+  }, [insights, ledgerSort]);
+
+  function toggleSort(col: string) {
+    setLedgerSort((prev) =>
+      prev.col === col ? { col, dir: prev.dir === "asc" ? "desc" : "asc" } : { col, dir: "desc" }
+    );
+  }
 
   return (
     <>
@@ -271,20 +311,54 @@ export default function Dashboard() {
           <div className="kpi" style={{ ["--accent" as any]: "var(--amber)" }}>
             <div className="kpi-label">Revenue</div>
             <div className="kpi-value mono">{kpis ? fmtMoney(kpis.revenue) : "—"}</div>
+            <DeltaBadge pct={insights?.comparison?.revenue_change_pct ?? null} />
           </div>
           <div className="kpi" style={{ ["--accent" as any]: "var(--cyan)" }}>
             <div className="kpi-label">Fuel Gallons</div>
             <div className="kpi-value mono">{kpis ? fmtNum(kpis.fuel_gallons, 1) : "—"}</div>
+            <DeltaBadge pct={insights?.comparison?.fuel_gallons_change_pct ?? null} />
           </div>
           <div className="kpi" style={{ ["--accent" as any]: "var(--tan)" }}>
             <div className="kpi-label">Transactions</div>
             <div className="kpi-value mono">{kpis ? fmtNum(kpis.txn_count) : "—"}</div>
+            <DeltaBadge pct={insights?.comparison?.txn_count_change_pct ?? null} />
           </div>
           <div className="kpi" style={{ ["--accent" as any]: "var(--rose)" }}>
             <div className="kpi-label">Avg Ticket</div>
             <div className="kpi-value mono">{kpis ? fmtMoney(avgTicket) : "—"}</div>
           </div>
+          <div className="kpi" style={{ ["--accent" as any]: "var(--cyan)" }}>
+            <div className="kpi-label">Tax Collected</div>
+            <div className="kpi-value mono">{kpis ? fmtMoney(kpis.tax_collected) : "—"}</div>
+          </div>
         </section>
+
+        {insights?.highlights?.busiest_hour && insights.highlights.busiest_hour.revenue > 0 && (
+          <div className="highlights-bar">
+            <span>
+              Busiest hour: <strong>{hourLabel(insights.highlights.busiest_hour.hour)}</strong> (
+              {fmtMoney(insights.highlights.busiest_hour.revenue)})
+            </span>
+            {insights.highlights.busiest_day && insights.highlights.busiest_day.revenue > 0 && (
+              <span>
+                Busiest day: <strong>{insights.highlights.busiest_day.label}</strong> (
+                {fmtMoney(insights.highlights.busiest_day.revenue)})
+              </span>
+            )}
+            {kpis?.avg_price_per_gallon != null && (
+              <span>
+                Avg price/gal: <strong>${kpis.avg_price_per_gallon.toFixed(3)}</strong>
+              </span>
+            )}
+          </div>
+        )}
+
+        {insights?.pump_flags?.length > 0 && (
+          <div className="pump-warning">
+            ⚠ No fuel sales this range from: {insights.pump_flags.map((p: number) => `Pump ${p}`).join(", ")} —
+            worth a quick check if that's unexpected.
+          </div>
+        )}
 
         <section className="main-grid">
           <div className="panel">
@@ -473,6 +547,137 @@ export default function Dashboard() {
                 <tr>
                   <td colSpan={4} className="empty-note">
                     No merchandise sales in this range yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </section>
+
+        <section className="tri-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+          <div className="panel">
+            <div className="panel-head">
+              <h2>Busiest hours</h2>
+              <span className="panel-sub">all days in range, combined</span>
+            </div>
+            {insights?.hour_of_day?.some((h: any) => h.revenue > 0) ? (
+              <Bar
+                data={{
+                  labels: insights.hour_of_day.map((h: any) => hourLabel(h.hour)),
+                  datasets: [{ data: insights.hour_of_day.map((h: any) => h.revenue), backgroundColor: "#E8A33D", borderRadius: 3 }],
+                }}
+                options={chartBaseOptions as any}
+              />
+            ) : (
+              <div className="empty-note">No data in this range yet.</div>
+            )}
+          </div>
+          <div className="panel">
+            <div className="panel-head">
+              <h2>Busiest days of week</h2>
+              <span className="panel-sub">all weeks in range, combined</span>
+            </div>
+            {insights?.day_of_week?.some((d: any) => d.revenue > 0) ? (
+              <Bar
+                data={{
+                  labels: insights.day_of_week.map((d: any) => d.label),
+                  datasets: [{ data: insights.day_of_week.map((d: any) => d.revenue), backgroundColor: "#9C8FE0", borderRadius: 3 }],
+                }}
+                options={chartBaseOptions as any}
+              />
+            ) : (
+              <div className="empty-note">No data in this range yet.</div>
+            )}
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-head">
+            <h2>Daily ledger</h2>
+            <div className="panel-head-actions">
+              <button
+                className="export-btn"
+                onClick={() => downloadCSV(`daily-ledger-${range}.csv`, sortedLedger)}
+              >
+                Export CSV
+              </button>
+              <button className="print-btn" onClick={() => window.print()}>
+                Print report
+              </button>
+            </div>
+          </div>
+          <table className="sortable-table">
+            <thead>
+              <tr>
+                {[
+                  ["day", "Date"],
+                  ["txn_count", "Transactions"],
+                  ["revenue", "Revenue"],
+                  ["fuel_gallons", "Fuel Gallons"],
+                  ["fuel_revenue", "Fuel Revenue"],
+                  ["tax_collected", "Tax Collected"],
+                ].map(([key, label]) => (
+                  <th
+                    key={key}
+                    className={ledgerSort.col === key ? "sorted" : ""}
+                    onClick={() => toggleSort(key)}
+                  >
+                    {label} {ledgerSort.col === key ? (ledgerSort.dir === "asc" ? "↑" : "↓") : ""}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sortedLedger.length ? (
+                sortedLedger.map((row: any) => (
+                  <tr key={row.day}>
+                    <td>{new Date(row.day + "T12:00:00Z").toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}</td>
+                    <td>{fmtNum(row.txn_count)}</td>
+                    <td>{fmtMoney(row.revenue)}</td>
+                    <td>{fmtNum(row.fuel_gallons, 1)}</td>
+                    <td>{fmtMoney(row.fuel_revenue)}</td>
+                    <td>{fmtMoney(row.tax_collected)}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={6} className="empty-note">
+                    No days with activity in this range yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </section>
+
+        <section className="panel">
+          <div className="panel-head">
+            <h2>Repeat customers</h2>
+            <span className="panel-sub">cards seen 2+ times in this range, by last 4 digits</span>
+          </div>
+          <table className="sortable-table">
+            <thead>
+              <tr>
+                <th>Card ending in</th>
+                <th>Visits</th>
+                <th>Total spent</th>
+                <th>Last seen</th>
+              </tr>
+            </thead>
+            <tbody>
+              {insights?.repeat_customers?.length ? (
+                insights.repeat_customers.map((c: any) => (
+                  <tr key={c.card_last4}>
+                    <td>•••• {c.card_last4}</td>
+                    <td>{fmtNum(c.visits)}</td>
+                    <td>{fmtMoney(c.total_spent)}</td>
+                    <td>{new Date(c.last_seen).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={4} className="empty-note">
+                    No repeat customers detected in this range yet.
                   </td>
                 </tr>
               )}

@@ -242,7 +242,8 @@ export async function getLiveFeed(limit = 50) {
 export async function getKpis(start: string, end: string) {
   const db = sql();
   const [row] = await db`
-    SELECT COUNT(*)::int AS txn_count, COALESCE(SUM(total_with_tax), 0) AS revenue
+    SELECT COUNT(*)::int AS txn_count, COALESCE(SUM(total_with_tax), 0) AS revenue,
+           COALESCE(SUM(total_tax), 0) AS tax_collected
     FROM transactions WHERE date >= ${start} AND date < ${end}
   `;
   const [fuelRow] = await db`
@@ -251,12 +252,16 @@ export async function getKpis(start: string, end: string) {
     FROM transaction_lines l JOIN transactions t ON t.unique_id = l.unique_id
     WHERE l.is_fuel = true AND t.date >= ${start} AND t.date < ${end}
   `;
+  const fuelGallons = Number(fuelRow.fuel_gallons);
+  const fuelRevenue = Number(fuelRow.fuel_revenue);
   return {
     txn_count: row.txn_count as number,
     revenue: Number(row.revenue),
-    fuel_revenue: Number(fuelRow.fuel_revenue),
-    fuel_gallons: Number(fuelRow.fuel_gallons),
-    merch_revenue: Number(row.revenue) - Number(fuelRow.fuel_revenue),
+    tax_collected: Number(row.tax_collected),
+    fuel_revenue: fuelRevenue,
+    fuel_gallons: fuelGallons,
+    merch_revenue: Number(row.revenue) - fuelRevenue,
+    avg_price_per_gallon: fuelGallons > 0 ? fuelRevenue / fuelGallons : null,
   };
 }
 
@@ -346,4 +351,145 @@ export async function getStatus() {
     last_transaction_date: lastRow.d,
     files_processed: files,
   };
+}
+
+// ── Extended analytics ──────────────────────────────────────
+
+/** Revenue/transactions grouped by hour-of-day (0-23, Central time),
+ * collapsed across every day in the range - answers "when are we
+ * busiest," not "how much on which specific day." */
+export async function getHourOfDayBreakdown(start: string, end: string) {
+  const db = sql();
+  const rows = await db.query(
+    `SELECT EXTRACT(HOUR FROM date AT TIME ZONE 'America/Chicago')::int AS hour,
+            COUNT(*)::int AS txn_count,
+            COALESCE(SUM(total_with_tax), 0) AS revenue
+     FROM transactions WHERE date >= $1 AND date < $2
+     GROUP BY hour ORDER BY hour ASC`,
+    [start, end]
+  );
+  // Always return all 24 hours, zero-filled, so the chart's x-axis never
+  // has gaps just because a quiet hour had zero transactions.
+  const byHour = new Map((rows as any[]).map((r) => [r.hour, r]));
+  return Array.from({ length: 24 }, (_, h) => ({
+    hour: h,
+    txn_count: byHour.get(h)?.txn_count ?? 0,
+    revenue: Number(byHour.get(h)?.revenue ?? 0),
+  }));
+}
+
+/** Revenue/transactions grouped by day-of-week (0=Sunday..6=Saturday,
+ * Central time), collapsed across every week in the range. */
+export async function getDayOfWeekBreakdown(start: string, end: string) {
+  const db = sql();
+  const rows = await db.query(
+    `SELECT EXTRACT(DOW FROM date AT TIME ZONE 'America/Chicago')::int AS dow,
+            COUNT(*)::int AS txn_count,
+            COALESCE(SUM(total_with_tax), 0) AS revenue
+     FROM transactions WHERE date >= $1 AND date < $2
+     GROUP BY dow ORDER BY dow ASC`,
+    [start, end]
+  );
+  const byDow = new Map((rows as any[]).map((r) => [r.dow, r]));
+  const LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  return Array.from({ length: 7 }, (_, d) => ({
+    dow: d,
+    label: LABELS[d],
+    txn_count: byDow.get(d)?.txn_count ?? 0,
+    revenue: Number(byDow.get(d)?.revenue ?? 0),
+  }));
+}
+
+/** KPIs for the period of equal length immediately BEFORE `start` - lets
+ * the dashboard show "+12% vs previous period" style comparisons. */
+export async function getPreviousPeriodKpis(start: string, end: string) {
+  const startMs = new Date(start).getTime();
+  const endMs = new Date(end).getTime();
+  const spanMs = endMs - startMs;
+  const prevEnd = new Date(startMs).toISOString();
+  const prevStart = new Date(startMs - spanMs).toISOString();
+  return getKpis(prevStart, prevEnd);
+}
+
+/** One row per calendar day (Central time) in the range - the "ledger"
+ * view for scanning/sorting day by day, independent of the live feed. */
+export async function getDailyLedger(start: string, end: string) {
+  const db = sql();
+
+  const txnRows = await db.query(
+    `SELECT to_char(date AT TIME ZONE 'America/Chicago', 'YYYY-MM-DD') AS day,
+            COUNT(*)::int AS txn_count,
+            COALESCE(SUM(total_with_tax), 0) AS revenue,
+            COALESCE(SUM(total_tax), 0) AS tax_collected
+     FROM transactions
+     WHERE date >= $1 AND date < $2
+     GROUP BY day`,
+    [start, end]
+  );
+
+  const fuelRows = await db.query(
+    `SELECT to_char(t.date AT TIME ZONE 'America/Chicago', 'YYYY-MM-DD') AS day,
+            COALESCE(SUM(l.fuel_volume), 0) AS fuel_gallons,
+            COALESCE(SUM(l.line_total), 0) AS fuel_revenue
+     FROM transaction_lines l JOIN transactions t ON t.unique_id = l.unique_id
+     WHERE l.is_fuel = true AND t.date >= $1 AND t.date < $2
+     GROUP BY day`,
+    [start, end]
+  );
+
+  const fuelByDay = new Map((fuelRows as any[]).map((r) => [r.day, r]));
+  return (txnRows as any[])
+    .map((r) => ({
+      day: r.day as string,
+      txn_count: r.txn_count as number,
+      revenue: Number(r.revenue),
+      tax_collected: Number(r.tax_collected),
+      fuel_gallons: Number(fuelByDay.get(r.day)?.fuel_gallons ?? 0),
+      fuel_revenue: Number(fuelByDay.get(r.day)?.fuel_revenue ?? 0),
+    }))
+    .sort((a, b) => a.day.localeCompare(b.day));
+}
+
+/** Cards seen more than once in the range, by last 4 digits - a simple
+ * repeat-customer signal. Cash payments have no card and are excluded. */
+export async function getRepeatCustomers(start: string, end: string, minVisits = 2, limit = 20) {
+  const db = sql();
+  const rows = await db.query(
+    `SELECT p.card_last4 AS card_last4,
+            COUNT(*)::int AS visits,
+            COALESCE(SUM(p.amount), 0) AS total_spent,
+            MAX(t.date) AS last_seen
+     FROM transaction_payments p
+     JOIN transactions t ON t.unique_id = p.unique_id
+     WHERE p.card_last4 IS NOT NULL AND t.date >= $1 AND t.date < $2
+     GROUP BY p.card_last4
+     HAVING COUNT(*) >= $3
+     ORDER BY visits DESC, total_spent DESC
+     LIMIT $4`,
+    [start, end, minVisits, limit]
+  );
+  return (rows as any[]).map((r) => ({ ...r, total_spent: Number(r.total_spent) }));
+}
+
+/** Flags any pump that's active elsewhere in the data but saw NO fuel
+ * sales in this specific range - a simple "might be down" signal, not a
+ * diagnosis (could just be legitimately quiet, but worth a glance). */
+export async function getPumpHealthFlags(start: string, end: string) {
+  const db = sql();
+  const allPumps = await db`
+    SELECT DISTINCT pump_number FROM transaction_lines
+    WHERE is_fuel = true AND pump_number IS NOT NULL
+  `;
+  const activePumps = await db.query(
+    `SELECT DISTINCT l.pump_number
+     FROM transaction_lines l JOIN transactions t ON t.unique_id = l.unique_id
+     WHERE l.is_fuel = true AND l.pump_number IS NOT NULL
+       AND t.date >= $1 AND t.date < $2`,
+    [start, end]
+  );
+  const activeSet = new Set((activePumps as any[]).map((r) => r.pump_number));
+  return allPumps
+    .map((r) => r.pump_number as number)
+    .filter((p) => !activeSet.has(p))
+    .sort((a, b) => a - b);
 }

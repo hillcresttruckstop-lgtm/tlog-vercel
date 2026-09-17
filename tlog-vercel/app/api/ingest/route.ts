@@ -27,8 +27,10 @@ export const maxDuration = 60; // seconds - raise via Vercel Pro if your backlog
 
 // Cap files processed per invocation so a huge backlog of historical
 // archives can't blow past the function's time limit in one go - it'll
-// just finish catching up over the next few cron cycles instead.
-const MAX_FILES_PER_RUN = 20;
+// just finish catching up over the next few cron cycles instead. Raised
+// from 20 since bulk-inserting (see db.ts) made each file much faster to
+// process - Drive download + parse time is now the bottleneck, not DB writes.
+const MAX_FILES_PER_RUN = 40;
 
 function isAuthorized(req: NextRequest): boolean {
   const expected = process.env.INGEST_SECRET;
