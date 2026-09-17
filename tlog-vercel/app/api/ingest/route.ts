@@ -3,8 +3,18 @@
  * ============
  * Called by your free external scheduler (cron-job.org / GitHub Actions)
  * every ~15 minutes. Lists TLog files in the Drive folder, and for any
- * that are new or changed since last time (by content hash), downloads,
- * parses, and stores them.
+ * that are new or changed since last time, downloads, parses, and
+ * stores them.
+ *
+ * Speed matters here: cron-job.org's free tier gives up and marks a run
+ * "failed (timeout)" after 30 seconds, even if the underlying job is
+ * still working. Two things keep this comfortably under that:
+ *   1. Google Drive's own `modifiedTime` on each file lets us skip
+ *      downloading anything we've already processed and that hasn't
+ *      changed - critical once you have dozens of historical archive
+ *      files that will never change again after the day they're created.
+ *   2. Files that DO need downloading happen with limited concurrency
+ *      instead of one at a time.
  *
  * Protected by a shared secret so random internet traffic can't trigger
  * (and bill) your ingestion - pass it as ?secret=... or an
@@ -12,25 +22,24 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { listTlogFiles, downloadFile } from "@/lib/driveClient";
+import { listTlogFiles, downloadFile, DriveFileRef } from "@/lib/driveClient";
 import { parseTlog } from "@/lib/tlogParser";
 import {
   initSchema,
   fileHash,
-  isFileUnchanged,
+  getKnownModifiedTime,
   ingestTransactions,
   markFileProcessed,
 } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60; // seconds - raise via Vercel Pro if your backlog needs longer
+export const maxDuration = 60; // Vercel's own limit - separate from cron-job.org's 30s
 
-// Cap files processed per invocation so a huge backlog of historical
-// archives can't blow past the function's time limit in one go - it'll
-// just finish catching up over the next few cron cycles instead. Raised
-// from 20 since bulk-inserting (see db.ts) made each file much faster to
-// process - Drive download + parse time is now the bottleneck, not DB writes.
-const MAX_FILES_PER_RUN = 40;
+// How many files to actually download+process in one run, and how many
+// of those to do at once. Kept conservative so a real run - even one
+// catching up a backlog - finishes well under cron-job.org's 30s cutoff.
+const MAX_FILES_PER_RUN = 15;
+const CONCURRENCY = 5;
 
 function isAuthorized(req: NextRequest): boolean {
   const expected = process.env.INGEST_SECRET;
@@ -41,6 +50,49 @@ function isAuthorized(req: NextRequest): boolean {
   return param === expected;
 }
 
+interface ProcessResult {
+  file: string;
+  skipped?: boolean;
+  error?: string;
+  transactions_in_file?: number;
+  new?: number;
+}
+
+async function processOneFile(file: DriveFileRef): Promise<ProcessResult> {
+  let raw: Buffer;
+  try {
+    raw = await downloadFile(file.id);
+  } catch (err: any) {
+    return { file: file.name, error: `download failed: ${err.message}` };
+  }
+
+  let txns;
+  try {
+    txns = parseTlog(raw, file.name);
+  } catch (err: any) {
+    return { file: file.name, error: `parse failed: ${err.message}` };
+  }
+
+  const newCount = await ingestTransactions(txns);
+  await markFileProcessed(file.name, fileHash(raw), txns.length, file.modifiedTime);
+
+  return { file: file.name, transactions_in_file: txns.length, new: newCount };
+}
+
+/** Runs `items` through `worker` with at most `limit` in flight at once. */
+async function runWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function runner() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await worker(items[i]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runner));
+  return results;
+}
+
 export async function GET(req: NextRequest) {
   if (!isAuthorized(req)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -48,56 +100,39 @@ export async function GET(req: NextRequest) {
 
   await initSchema();
 
-  let files;
+  let files: DriveFileRef[];
   try {
     files = await listTlogFiles();
   } catch (err: any) {
     return NextResponse.json({ error: `Drive list failed: ${err.message}` }, { status: 500 });
   }
 
-  const results: any[] = [];
-  let filesChanged = 0;
-  let newTxnTotal = 0;
-  let processedThisRun = 0;
-
+  // Cheap pass: for every file, compare Drive's modifiedTime against what
+  // we last recorded - no downloading required for this check at all.
+  const candidates: DriveFileRef[] = [];
+  let skippedCount = 0;
   for (const file of files) {
-    if (processedThisRun >= MAX_FILES_PER_RUN) break;
-
-    let raw: Buffer;
-    try {
-      raw = await downloadFile(file.id);
-    } catch (err: any) {
-      results.push({ file: file.name, error: `download failed: ${err.message}` });
+    const knownMtime = await getKnownModifiedTime(file.name);
+    if (knownMtime === file.modifiedTime) {
+      skippedCount++;
       continue;
     }
-
-    const hash = fileHash(raw);
-    if (await isFileUnchanged(file.name, hash)) continue; // no new data in this file
-
-    processedThisRun++;
-
-    let txns;
-    try {
-      txns = parseTlog(raw, file.name);
-    } catch (err: any) {
-      results.push({ file: file.name, error: `parse failed: ${err.message}` });
-      continue;
-    }
-
-    const newCount = await ingestTransactions(txns);
-    await markFileProcessed(file.name, hash, txns.length);
-
-    filesChanged++;
-    newTxnTotal += newCount;
-    results.push({ file: file.name, transactions_in_file: txns.length, new: newCount });
+    candidates.push(file);
   }
+
+  const toProcess = candidates.slice(0, MAX_FILES_PER_RUN);
+  const results = await runWithConcurrency(toProcess, CONCURRENCY, processOneFile);
+
+  const filesChanged = results.filter((r) => !r.error).length;
+  const newTxnTotal = results.reduce((sum, r) => sum + (r.new ?? 0), 0);
 
   return NextResponse.json({
     ok: true,
     files_seen: files.length,
+    files_skipped_unchanged: skippedCount,
     files_changed: filesChanged,
     new_transactions: newTxnTotal,
-    remaining_backlog: files.length - processedThisRun > 0 && processedThisRun >= MAX_FILES_PER_RUN,
+    remaining_backlog: candidates.length > toProcess.length,
     details: results,
   });
 }

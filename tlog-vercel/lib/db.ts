@@ -73,13 +73,27 @@ export async function initSchema() {
       filename        TEXT PRIMARY KEY,
       file_hash       TEXT,
       processed_at    TIMESTAMPTZ DEFAULT now(),
-      txn_count       INTEGER
+      txn_count       INTEGER,
+      modified_time   TEXT
     )
   `;
+  // Safe to run even if the table already existed before this column was added.
+  await db`ALTER TABLE processed_files ADD COLUMN IF NOT EXISTS modified_time TEXT`;
 }
 
 export function fileHash(raw: Buffer): string {
   return crypto.createHash("sha256").update(raw).digest("hex");
+}
+
+/** Cheap pre-check using Google Drive's own modifiedTime metadata - lets
+ * the caller skip downloading a file ENTIRELY if Drive says it hasn't
+ * changed since we last processed it. This is the difference between
+ * downloading every historical archive file on every single run forever,
+ * versus only ever downloading each one once. */
+export async function getKnownModifiedTime(filename: string): Promise<string | null> {
+  const db = sql();
+  const rows = await db`SELECT modified_time FROM processed_files WHERE filename = ${filename}`;
+  return rows.length > 0 ? (rows[0].modified_time as string | null) : null;
 }
 
 export async function isFileUnchanged(filename: string, hash: string): Promise<boolean> {
@@ -88,15 +102,21 @@ export async function isFileUnchanged(filename: string, hash: string): Promise<b
   return rows.length > 0 && rows[0].file_hash === hash;
 }
 
-export async function markFileProcessed(filename: string, hash: string, txnCount: number) {
+export async function markFileProcessed(
+  filename: string,
+  hash: string,
+  txnCount: number,
+  modifiedTime: string | null = null
+) {
   const db = sql();
   await db`
-    INSERT INTO processed_files (filename, file_hash, processed_at, txn_count)
-    VALUES (${filename}, ${hash}, now(), ${txnCount})
+    INSERT INTO processed_files (filename, file_hash, processed_at, txn_count, modified_time)
+    VALUES (${filename}, ${hash}, now(), ${txnCount}, ${modifiedTime})
     ON CONFLICT (filename) DO UPDATE SET
       file_hash = excluded.file_hash,
       processed_at = now(),
-      txn_count = excluded.txn_count
+      txn_count = excluded.txn_count,
+      modified_time = excluded.modified_time
   `;
 }
 
