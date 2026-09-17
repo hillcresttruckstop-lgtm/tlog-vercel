@@ -120,6 +120,16 @@ export async function GET(req: NextRequest) {
     candidates.push(file);
   }
 
+  // current.1/current.2 hold TODAY's live data and must never get
+  // starved out by a large backlog of historical archive files (which
+  // matters especially right after deploying a change like this one,
+  // where hundreds of already-ingested files all look "changed" for one
+  // run just because they're being seen for the first time since this
+  // metadata was added - without this, that one-time backfill could
+  // block live updates for hours).
+  const isCurrentFile = (name: string) => name === "current.1.xml.gz" || name === "current.2.xml.gz";
+  candidates.sort((a, b) => Number(isCurrentFile(b.name)) - Number(isCurrentFile(a.name)));
+
   const toProcess = candidates.slice(0, MAX_FILES_PER_RUN);
   const results = await runWithConcurrency(toProcess, CONCURRENCY, processOneFile);
 

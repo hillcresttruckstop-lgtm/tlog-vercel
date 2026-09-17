@@ -354,6 +354,49 @@ export default function Dashboard() {
           </div>
         </section>
 
+        {kpis && kpis.revenue > 0 && (
+          <section className="panel sales-mix">
+            <div className="panel-head">
+              <h2>Inside vs. outside sales</h2>
+              <span className="panel-sub">inside = merchandise, outside = fuel at the pump</span>
+            </div>
+            <div className="sales-mix-bar">
+              <div
+                className="sales-mix-segment outside"
+                style={{ width: `${(kpis.fuel_revenue / kpis.revenue) * 100}%` }}
+                title={`Outside (fuel): ${fmtMoney(kpis.fuel_revenue)}`}
+              />
+              <div
+                className="sales-mix-segment inside"
+                style={{ width: `${(kpis.merch_revenue / kpis.revenue) * 100}%` }}
+                title={`Inside (merch): ${fmtMoney(kpis.merch_revenue)}`}
+              />
+            </div>
+            <div className="sales-mix-legend">
+              <div className="sales-mix-stat">
+                <span className="sales-mix-dot outside" />
+                <div>
+                  <div className="sales-mix-label">Outside sale (fuel)</div>
+                  <div className="sales-mix-value mono">
+                    {fmtMoney(kpis.fuel_revenue)}
+                    <span className="sales-mix-pct"> · {((kpis.fuel_revenue / kpis.revenue) * 100).toFixed(1)}%</span>
+                  </div>
+                </div>
+              </div>
+              <div className="sales-mix-stat">
+                <span className="sales-mix-dot inside" />
+                <div>
+                  <div className="sales-mix-label">Inside sale (merchandise)</div>
+                  <div className="sales-mix-value mono">
+                    {fmtMoney(kpis.merch_revenue)}
+                    <span className="sales-mix-pct"> · {((kpis.merch_revenue / kpis.revenue) * 100).toFixed(1)}%</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
+
         {insights?.highlights?.busiest_hour && insights.highlights.busiest_hour.revenue > 0 && (
           <div className="highlights-bar">
             <span>
