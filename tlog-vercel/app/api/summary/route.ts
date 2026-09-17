@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { startOfDayInTZ, startOfYearInTZ } from "@/lib/tz";
 import {
   getKpis,
   getTimeseries,
@@ -30,14 +31,14 @@ function rangeBounds(rangeKey: string, startParam: string | null, endParam: stri
       start = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
       break;
     case "ytd":
-      start = new Date(now.getFullYear(), 0, 1);
+      start = startOfYearInTZ(now);
       break;
     case "year":
       start = new Date(now.getTime() - 365 * 24 * 3600 * 1000);
       break;
     case "today":
     default:
-      start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      start = startOfDayInTZ(now);
       end = new Date(start.getTime() + 24 * 3600 * 1000);
       break;
   }
