@@ -2,9 +2,9 @@
  * proxy.ts
  * =========
  * Runs on every request (Vercel Edge runtime). Anything that isn't the
- * login page, the login API, static assets, or /api/ingest (which is
- * called by your external cron scheduler using its own secret, not a
- * logged-in browser session) requires a valid session cookie - otherwise
+ * login page, the login API, static assets, or /api/ingest / /api/admin/reset
+ * (called by an external scheduler or by hand using their own secret, not
+ * a logged-in browser session) requires a valid session cookie - otherwise
  * it's redirected to /login (for page loads) or gets a 401 (for API
  * calls the dashboard's own JS makes).
  */
@@ -12,7 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifySessionToken, COOKIE_NAME } from "@/lib/auth";
 
-const PUBLIC_PATHS = ["/login", "/api/login", "/api/ingest"];
+const PUBLIC_PATHS = ["/login", "/api/login", "/api/ingest", "/api/admin/reset"];
 
 export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;

@@ -355,8 +355,8 @@ export async function getMerchByCategory(start: string, end: string) {
             COUNT(*)::int AS sale_count
      FROM transaction_lines l JOIN transactions t ON t.unique_id = l.unique_id
      WHERE l.is_fuel = false AND t.date >= $1 AND t.date < $2
-       AND NOT (l.category = ANY($3::text[]))
-     GROUP BY category ORDER BY revenue DESC`,
+       AND NOT (COALESCE(l.category, 'UNCATEGORIZED') = ANY($3::text[]))
+     GROUP BY COALESCE(l.category, 'UNCATEGORIZED') ORDER BY revenue DESC`,
     [start, end, MERCH_EXCLUDED_CATEGORIES]
   );
   return (rows as any[]).map((r) => ({ ...r, revenue: Number(r.revenue) }));
