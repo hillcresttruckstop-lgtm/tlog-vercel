@@ -68,6 +68,7 @@ function downloadCSV(filename: string, rows: Record<string, unknown>[]) {
 
 interface FeedLine {
   description: string | null;
+  category: string | null;
   is_fuel: boolean;
   fuel_grade: string | null;
   fuel_volume: number | null;
@@ -105,6 +106,7 @@ function feedSearchText(item: FeedItem) {
     item.trans_type,
     item.total_with_tax != null ? item.total_with_tax.toFixed(2) : null,
     ...item.lines.map((l) => l.description),
+    ...item.lines.map((l) => l.category),
     ...item.lines.map((l) => l.fuel_grade),
     ...item.lines.map((l) => (l.pump_number ? `pump ${l.pump_number}` : null)),
     ...item.payments.map((p) => p.tender_type),
@@ -614,6 +616,38 @@ export default function Dashboard() {
               <div className="empty-note">No pump activity in this range yet.</div>
             )}
           </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-head">
+            <h2>Merch sales by category</h2>
+            <div className="panel-head-actions">
+              <span className="panel-sub">
+                {summary?.merch_by_category?.length
+                  ? `Total: ${fmtMoney(summary.merch_by_category.reduce((s: number, c: any) => s + c.revenue, 0))}`
+                  : ""}
+              </span>
+              <button
+                className="export-btn"
+                onClick={() => downloadCSV(`merch-by-category-${range}.csv`, summary?.merch_by_category || [])}
+              >
+                Export CSV
+              </button>
+            </div>
+          </div>
+          {summary?.merch_by_category?.length ? (
+            <div className="category-grid">
+              {summary.merch_by_category.map((c: any) => (
+                <div className="category-card" key={c.category}>
+                  <div className="category-name">{c.category}</div>
+                  <div className="category-value mono">{fmtMoney(c.revenue)}</div>
+                  <div className="category-count">{fmtNum(c.sale_count)} sale{c.sale_count === 1 ? "" : "s"}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-note">No merchandise sales in this range yet.</div>
+          )}
         </section>
 
         <section className="panel">

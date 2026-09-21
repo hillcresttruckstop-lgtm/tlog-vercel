@@ -44,6 +44,7 @@ export async function initSchema() {
       unique_id       TEXT NOT NULL REFERENCES transactions(unique_id),
       dept_number     TEXT,
       dept_type       TEXT,
+      category        TEXT,
       description     TEXT,
       qty             NUMERIC,
       unit_price      NUMERIC,
@@ -54,8 +55,11 @@ export async function initSchema() {
       pump_number     INTEGER
     )
   `;
+  // Safe to run even if the table already existed before this column was added.
+  await db`ALTER TABLE transaction_lines ADD COLUMN IF NOT EXISTS category TEXT`;
   await db`CREATE INDEX IF NOT EXISTS idx_lines_unique_id ON transaction_lines(unique_id)`;
   await db`CREATE INDEX IF NOT EXISTS idx_lines_is_fuel ON transaction_lines(is_fuel)`;
+  await db`CREATE INDEX IF NOT EXISTS idx_lines_category ON transaction_lines(category)`;
 
   await db`
     CREATE TABLE IF NOT EXISTS transaction_payments (
@@ -164,6 +168,7 @@ export async function ingestTransactions(transactions: Transaction[]): Promise<n
   const lineOwners: string[] = [];
   const lineDeptNum: (string | null)[] = [];
   const lineDeptType: (string | null)[] = [];
+  const lineCategory: (string | null)[] = [];
   const lineDesc: (string | null)[] = [];
   const lineQty: (number | null)[] = [];
   const lineUnitPrice: (number | null)[] = [];
@@ -178,6 +183,7 @@ export async function ingestTransactions(transactions: Transaction[]): Promise<n
       lineOwners.push(txn.unique_id);
       lineDeptNum.push(line.dept_number);
       lineDeptType.push(line.dept_type);
+      lineCategory.push(line.category);
       lineDesc.push(line.description);
       lineQty.push(line.qty);
       lineUnitPrice.push(line.unit_price);
@@ -191,14 +197,14 @@ export async function ingestTransactions(transactions: Transaction[]): Promise<n
   if (lineOwners.length > 0) {
     await db.query(
       `INSERT INTO transaction_lines
-         (unique_id, dept_number, dept_type, description, qty, unit_price,
+         (unique_id, dept_number, dept_type, category, description, qty, unit_price,
           line_total, is_fuel, fuel_grade, fuel_volume, pump_number)
        SELECT * FROM unnest(
-         $1::text[], $2::text[], $3::text[], $4::text[], $5::numeric[],
-         $6::numeric[], $7::numeric[], $8::boolean[], $9::text[], $10::numeric[], $11::int[]
+         $1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::numeric[],
+         $7::numeric[], $8::numeric[], $9::boolean[], $10::text[], $11::numeric[], $12::int[]
        )`,
       [
-        lineOwners, lineDeptNum, lineDeptType, lineDesc, lineQty,
+        lineOwners, lineDeptNum, lineDeptType, lineCategory, lineDesc, lineQty,
         lineUnitPrice, lineTotal, lineIsFuel, lineFuelGrade, lineFuelVolume, linePumpNumber,
       ]
     );
@@ -239,7 +245,7 @@ export async function getLiveFeed(limit = 50) {
   const out = [];
   for (const r of rows) {
     const lines = await db`
-      SELECT description, is_fuel, fuel_grade, fuel_volume, pump_number, line_total
+      SELECT description, category, is_fuel, fuel_grade, fuel_volume, pump_number, line_total
       FROM transaction_lines WHERE unique_id = ${r.unique_id as string}
     `;
     const payments = await db`
@@ -331,6 +337,29 @@ export async function getMerchByDepartment(start: string, end: string, limit = 1
     GROUP BY l.description, l.dept_number ORDER BY revenue DESC LIMIT ${limit}
   `;
   return rows.map((r) => ({ ...r, qty: Number(r.qty), revenue: Number(r.revenue) }));
+}
+
+/** Category-level breakdown (TOBACCO, BEVERAGES, DELI, GROC NOTAX, etc.) -
+ * matches the department-wise view already proven out in the Apps Script
+ * reporting, using the TLog's own trlCat tag rather than raw item
+ * descriptions. Lottery categories are intentionally excluded here (same
+ * exclusion list as the reference implementation) since lottery has its
+ * own dedicated Sales/Paid Out reporting, not a merchandise category. */
+const MERCH_EXCLUDED_CATEGORIES = ["SCRATCH OFF", "LOTTERY", "LOTTERY PO", "DELI WASTE", "GIFT CARD", "FUEL DEPOSIT"];
+
+export async function getMerchByCategory(start: string, end: string) {
+  const db = sql();
+  const rows = await db.query(
+    `SELECT COALESCE(l.category, 'UNCATEGORIZED') AS category,
+            COALESCE(SUM(l.line_total), 0) AS revenue,
+            COUNT(*)::int AS sale_count
+     FROM transaction_lines l JOIN transactions t ON t.unique_id = l.unique_id
+     WHERE l.is_fuel = false AND t.date >= $1 AND t.date < $2
+       AND NOT (l.category = ANY($3::text[]))
+     GROUP BY category ORDER BY revenue DESC`,
+    [start, end, MERCH_EXCLUDED_CATEGORIES]
+  );
+  return (rows as any[]).map((r) => ({ ...r, revenue: Number(r.revenue) }));
 }
 
 export async function getPaymentMix(start: string, end: string) {

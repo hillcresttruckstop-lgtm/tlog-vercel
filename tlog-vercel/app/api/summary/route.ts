@@ -5,6 +5,7 @@ import {
   getTimeseries,
   getFuelByGrade,
   getMerchByDepartment,
+  getMerchByCategory,
   getPaymentMix,
   getPumpActivity,
 } from "@/lib/db";
@@ -29,11 +30,12 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const [kpis, timeseries, fuelByGrade, merch, paymentMix, pumpActivity] = await Promise.all([
+  const [kpis, timeseries, fuelByGrade, merch, merchByCategory, paymentMix, pumpActivity] = await Promise.all([
     getKpis(start, end),
     getTimeseries(granularity, start, end),
     getFuelByGrade(start, end),
     getMerchByDepartment(start, end),
+    getMerchByCategory(start, end),
     getPaymentMix(start, end),
     getPumpActivity(start, end),
   ]);
@@ -44,6 +46,7 @@ export async function GET(req: NextRequest) {
     timeseries,
     fuel_by_grade: fuelByGrade,
     merch,
+    merch_by_category: merchByCategory,
     payment_mix: paymentMix,
     pump_activity: pumpActivity,
   });

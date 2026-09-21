@@ -2,10 +2,18 @@
  * tlogParser.ts
  * ==============
  * Parses VeriFone TLog XML (gzip or plain) into transaction records.
- * This is a direct TypeScript port of the Python parser that was tested
- * against real current.1.xml.gz / current.2.xml.gz files on 9/16/2026 -
- * same field mapping, same "sale" + "network sale" filter, same fuel/pump
- * extraction logic.
+ *
+ * Every exclusion/netting rule below was ported directly from the
+ * production Google Apps Script (TLog Nightly/Near-Real-Time Sync) that
+ * writes these same files into the monthly Google Sheets - each rule in
+ * that script was individually found and verified against real closed
+ * days over months of production use. This parser was previously missing
+ * ALL of them, which caused real, confirmed bugs: fuel/merch revenue
+ * inflated by double-logged fuel-prepay holds, no exclusion of
+ * cancelled/rolled-back payment attempts, and no category (trlCat) data
+ * at all for proper department-wise breakdowns. Every rule here was
+ * re-verified against this account's own real sample TLog data before
+ * being written (see the inline comments for what was actually found).
  */
 
 import { gunzipSync } from "zlib";
@@ -14,10 +22,11 @@ import { XMLParser } from "fast-xml-parser";
 export interface TxnLine {
   dept_number: string | null;
   dept_type: string | null;
+  category: string | null; // trlCat - e.g. "TOBACCO", "DELI", "GROC NOTAX"
   description: string | null;
   qty: number | null;
   unit_price: number | null;
-  line_total: number | null;
+  line_total: number | null; // for non-fuel lines, already promo-netted
   is_fuel: boolean;
   fuel_grade: string | null;
   fuel_volume: number | null;
@@ -49,7 +58,7 @@ const parser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
   textNodeName: "#text",
-  isArray: (name) => ["trans", "trLine", "trPayline"].includes(name),
+  isArray: (name) => ["trans", "trLine", "trPayline", "trlMatchLine"].includes(name),
 });
 
 function toFloat(v: unknown): number | null {
@@ -89,6 +98,60 @@ export function loadTransSet(rawBytes: Buffer): any {
   return doc.transSet;
 }
 
+/** The real posNum+trSeq pairing key VeriFone reuses between an original
+ * attempt and its rollback mirror. This is nested under
+ * trHeader > trTickNum, NOT a flat trHeader > posNum (which exists too,
+ * but is a different, largely-unused field - confirmed always "0" in
+ * this account's real data. Using the wrong one silently defeats
+ * rollback pairing entirely, which is exactly what this parser was doing
+ * before this fix.) */
+function getPosSeqKey(trans: any): string | null {
+  const tick = trans.trHeader?.trTickNum;
+  if (!tick) return null;
+  const pos = textOf(tick.posNum);
+  const seq = textOf(tick.trSeq);
+  if (pos === null || seq === null) return null;
+  return `${pos}|${seq}`;
+}
+
+/** True if this transaction has a preFuel or void preFuel line anywhere
+ * in it - VeriFone logs every fuel-prepay authorization as its own
+ * "deposit" transaction (trlDept type="fuel", NO real <trlFuel> child)
+ * separate from the real completion sale that follows it. Confirmed in
+ * this account's own real data: a $20.00 "FUEL DEPOSIT" line with
+ * trlDept type="fuel" but no <trlFuel> element - our old is_fuel check
+ * (deptType === "fuel") flagged it as real fuel revenue anyway, double-
+ * counting that $20 alongside the real completion sale that records the
+ * same purchase correctly. The whole transaction is excluded, matching
+ * the reference implementation exactly (not just the FUEL DEPOSIT line -
+ * a combo ticket bundling real merchandise with a fuel prepay would
+ * otherwise still lose that merchandise's real payment/tax while keeping
+ * the fake deposit line). */
+function transactionHasPreFuelLine(lineList: any[]): boolean {
+  for (const line of lineList) {
+    const t = line["@_type"];
+    if (t === "preFuel" || t === "void preFuel") return true;
+  }
+  return false;
+}
+
+/** Sum of every trlPromoAmount inside a merch line's mix-and-match promo
+ * block. trlLineTot is the PRE-promotion price for mix-and-match items -
+ * the discount only ever appears here, never folded back into
+ * trlLineTot itself. Confirmed present in this account's real data (6
+ * occurrences in one sample file) - without this, merch revenue is
+ * overstated by whatever was given away in mix-and-match promos. */
+function sumPromoAmount(line: any): number {
+  const mixMatches = line.trlMixMatches;
+  if (!mixMatches) return 0;
+  let sum = 0;
+  for (const matchLine of asArray(mixMatches.trlMatchLine)) {
+    const promo = toFloat(textOf(matchLine.trlPromoAmount));
+    if (promo !== null) sum += promo;
+  }
+  return sum;
+}
+
 function parseOneTrans(trans: any, sourceFile: string): Transaction | null {
   const transType: string = trans["@_type"];
   const header = trans.trHeader;
@@ -98,7 +161,9 @@ function parseOneTrans(trans: any, sourceFile: string): Transaction | null {
   if (!uniqueId) return null;
 
   const dateStr = textOf(header.date) ?? "";
-  const posNum = toInt(textOf(header.posNum));
+  // Real distinguishing station identifier lives under trTickNum, not the
+  // flat trHeader > posNum field (see getPosSeqKey comment above).
+  const posNum = toInt(textOf(header.trTickNum?.posNum));
   const till = toInt(textOf(header.till));
   const cashierRaw = header.cashier;
   const cashier =
@@ -113,50 +178,59 @@ function parseOneTrans(trans: any, sourceFile: string): Transaction | null {
 
   const lines: TxnLine[] = [];
   const trLines = trans.trLines;
-  if (trLines) {
-    for (const line of asArray(trLines.trLine)) {
-      const dept = line.trlDept;
-      const deptNumber = dept ? dept["@_number"] ?? null : null;
-      const deptType = dept ? dept["@_type"] ?? null : null;
-      const deptName = dept ? textOf(dept) : null;
+  const rawLineList = trLines ? asArray(trLines.trLine) : [];
 
-      const qty = toFloat(textOf(line.trlQty));
-      const unitPrice = toFloat(textOf(line.trlUnitPrice));
-      const lineTotal = toFloat(textOf(line.trlLineTot));
-      const desc = textOf(line.trlDesc) ?? deptName;
+  for (const line of rawLineList) {
+    const dept = line.trlDept;
+    const deptNumber = dept ? dept["@_number"] ?? null : null;
+    const deptType = dept ? dept["@_type"] ?? null : null;
+    const deptName = dept ? textOf(dept) : null;
+    const category = textOf(line.trlCat);
 
-      const fuel = line.trlFuel;
-      const isFuel = deptType === "fuel" || !!fuel;
-      let fuelGrade: string | null = null;
-      let fuelVolume: number | null = null;
-      let pumpNumber: number | null = null;
+    const qty = toFloat(textOf(line.trlQty));
+    const unitPrice = toFloat(textOf(line.trlUnitPrice));
+    const rawLineTotal = toFloat(textOf(line.trlLineTot));
+    const desc = textOf(line.trlDesc) ?? deptName;
 
-      if (fuel) {
-        fuelGrade = textOf(fuel.fuelProd) ?? deptName;
-        fuelVolume = toFloat(textOf(fuel.fuelVolume));
-        pumpNumber = toInt(textOf(fuel.fuelPosition));
-      } else if (isFuel) {
-        fuelGrade = deptName;
-      }
+    // Only a REAL <trlFuel> child means real fuel data - a "fuel"-typed
+    // department with no trlFuel child (the FUEL DEPOSIT pattern above)
+    // is not actually a fuel line, it just shares the department type.
+    const fuel = line.trlFuel;
+    const isFuel = !!fuel;
+    let fuelGrade: string | null = null;
+    let fuelVolume: number | null = null;
+    let pumpNumber: number | null = null;
+    let lineTotal = rawLineTotal;
 
-      if (isFuel && pumpNumber === null && desc) {
-        const m = desc.match(/#(\d+)/);
-        if (m) pumpNumber = parseInt(m[1], 10);
-      }
-
-      lines.push({
-        dept_number: deptNumber,
-        dept_type: deptType,
-        description: desc,
-        qty,
-        unit_price: unitPrice,
-        line_total: lineTotal,
-        is_fuel: isFuel,
-        fuel_grade: fuelGrade,
-        fuel_volume: fuelVolume,
-        pump_number: pumpNumber,
-      });
+    if (fuel) {
+      fuelGrade = textOf(fuel.fuelProd) ?? deptName;
+      fuelVolume = toFloat(textOf(fuel.fuelVolume));
+      pumpNumber = toInt(textOf(fuel.fuelPosition));
+    } else if (rawLineTotal !== null) {
+      // Merch line: net out any mix-and-match promo discount, matching
+      // the reference implementation exactly.
+      const promo = sumPromoAmount(line);
+      lineTotal = promo > 0 ? rawLineTotal - promo : rawLineTotal;
     }
+
+    if (isFuel && pumpNumber === null && desc) {
+      const m = desc.match(/#(\d+)/);
+      if (m) pumpNumber = parseInt(m[1], 10);
+    }
+
+    lines.push({
+      dept_number: deptNumber,
+      dept_type: deptType,
+      category,
+      description: desc,
+      qty,
+      unit_price: unitPrice,
+      line_total: lineTotal,
+      is_fuel: isFuel,
+      fuel_grade: fuelGrade,
+      fuel_volume: fuelVolume,
+      pump_number: pumpNumber,
+    });
   }
 
   const payments: TxnPayment[] = [];
@@ -193,10 +267,46 @@ function parseOneTrans(trans: any, sourceFile: string): Transaction | null {
 
 export function parseTlog(rawBytes: Buffer, sourceFile: string): Transaction[] {
   const transSet = loadTransSet(rawBytes);
+  const allTrans = asArray(transSet.trans);
+
+  // PASS 1: find every (posNum, trSeq) pair that has a rollback="true"
+  // record anywhere - a cancelled/declined payment attempt, not a real
+  // sale, and its paired original attempt must be excluded too. Confirmed
+  // real in this account's own data (1 occurrence in one sample file).
+  const rollbackKeys = new Set<string>();
+  for (const trans of allTrans) {
+    if (trans["@_rollback"] === "true") {
+      const key = getPosSeqKey(trans);
+      if (key) rollbackKeys.add(key);
+    }
+  }
+
+  // PASS 2: process real sales, applying every exclusion in the same
+  // order as the reference implementation.
   const out: Transaction[] = [];
-  for (const trans of asArray(transSet.trans)) {
+  for (const trans of allTrans) {
     const type = trans["@_type"];
-    if (type !== "sale" && type !== "network sale") continue;
+
+    // "sale" and "network sale" are the two everyday transaction types.
+    // "refund sale" / "refund network sale" are real (confirmed 7/22/2026
+    // and 6/10/2026 in the reference system) - their line amounts are
+    // already negative, so including them correctly nets returns against
+    // gross sales instead of silently overstating revenue by the refund
+    // amount, which is what excluding them entirely would do.
+    if (type !== "sale" && type !== "network sale" && type !== "refund sale" && type !== "refund network sale") {
+      continue;
+    }
+
+    const key = getPosSeqKey(trans);
+    if (key && rollbackKeys.has(key)) continue; // cancelled attempt - not a real sale
+
+    const suspendedAttr = trans["@_suspended"];
+    if (suspendedAttr === "true") continue; // parked sale, not yet paid - not a real sale (yet)
+
+    const trLines = trans.trLines;
+    const rawLineList = trLines ? asArray(trLines.trLine) : [];
+    if (transactionHasPreFuelLine(rawLineList)) continue; // fuel-prepay hold, see comment above
+
     const parsed = parseOneTrans(trans, sourceFile);
     if (parsed) out.push(parsed);
   }
