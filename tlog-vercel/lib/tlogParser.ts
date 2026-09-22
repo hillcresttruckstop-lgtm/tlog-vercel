@@ -44,6 +44,7 @@ export interface Transaction {
   source_file: string;
   trans_type: string;
   pos_num: number | null;
+  tr_seq: string | null; // the register's own sequential ticket number - a real, human-meaningful "Transaction #"
   date: string;
   cashier: string | null;
   till: number | null;
@@ -164,6 +165,7 @@ function parseOneTrans(trans: any, sourceFile: string): Transaction | null {
   // Real distinguishing station identifier lives under trTickNum, not the
   // flat trHeader > posNum field (see getPosSeqKey comment above).
   const posNum = toInt(textOf(header.trTickNum?.posNum));
+  const trSeq = textOf(header.trTickNum?.trSeq);
   const till = toInt(textOf(header.till));
   const cashierRaw = header.cashier;
   const cashier =
@@ -254,6 +256,7 @@ function parseOneTrans(trans: any, sourceFile: string): Transaction | null {
     source_file: sourceFile,
     trans_type: transType,
     pos_num: posNum,
+    tr_seq: trSeq,
     date: dateStr,
     cashier,
     till,
@@ -265,7 +268,18 @@ function parseOneTrans(trans: any, sourceFile: string): Transaction | null {
   };
 }
 
-export function parseTlog(rawBytes: Buffer, sourceFile: string): Transaction[] {
+export interface VoidEvent {
+  unique_id: string;
+  date: string;
+  source_file: string;
+}
+
+export interface ParseResult {
+  transactions: Transaction[];
+  voidEvents: VoidEvent[];
+}
+
+export function parseTlog(rawBytes: Buffer, sourceFile: string): ParseResult {
   const transSet = loadTransSet(rawBytes);
   const allTrans = asArray(transSet.trans);
 
@@ -282,10 +296,28 @@ export function parseTlog(rawBytes: Buffer, sourceFile: string): Transaction[] {
   }
 
   // PASS 2: process real sales, applying every exclusion in the same
-  // order as the reference implementation.
+  // order as the reference implementation. "void" transactions are
+  // tracked SEPARATELY (voidEvents) rather than mixed into the same list
+  // as real sales - keeping them fully separate means no existing
+  // revenue/transaction-count query needs to remember to filter them
+  // back out, which is exactly the kind of easy-to-forget mistake that
+  // caused the fuel-deposit double-counting bug this parser already
+  // fixed once.
   const out: Transaction[] = [];
+  const voidEvents: VoidEvent[] = [];
+
   for (const trans of allTrans) {
     const type = trans["@_type"];
+
+    if (type === "void") {
+      const header = trans.trHeader;
+      const uniqueId = header ? textOf(header.uniqueID) : null;
+      const dateStr = header ? textOf(header.date) : null;
+      if (uniqueId && dateStr) {
+        voidEvents.push({ unique_id: uniqueId, date: dateStr, source_file: sourceFile });
+      }
+      continue;
+    }
 
     // "sale" and "network sale" are the two everyday transaction types.
     // "refund sale" / "refund network sale" are real (confirmed 7/22/2026
@@ -310,5 +342,5 @@ export function parseTlog(rawBytes: Buffer, sourceFile: string): Transaction[] {
     const parsed = parseOneTrans(trans, sourceFile);
     if (parsed) out.push(parsed);
   }
-  return out;
+  return { transactions: out, voidEvents };
 }

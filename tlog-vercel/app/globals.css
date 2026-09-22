@@ -35,6 +35,8 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 0;
   padding: 18px 28px;
   border-bottom: 1px solid var(--panel-border);
 }
@@ -53,7 +55,22 @@ html, body {
   100% { box-shadow: 0 0 0 0 rgba(79, 209, 163, 0); }
 }
 
-.status { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--text-dim); }
+.status {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+}
+
+@media (max-width: 640px) {
+  .topbar { padding: 14px 16px; }
+  .status { font-size: 11px; }
+  .refresh-track { display: none; } /* the countdown bar is a nice-to-have, not worth the space on a phone */
+}
 
 .range-tabs { display: flex; gap: 4px; padding: 14px 28px 0; flex-wrap: wrap; }
 .range-tabs button {
@@ -93,7 +110,7 @@ main { padding: 20px 28px 40px; display: flex; flex-direction: column; gap: 18px
 }
 
 .panel { background: var(--panel); border: 1px solid var(--panel-border); border-radius: var(--radius); padding: 16px 18px 18px; }
-.panel-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
+.panel-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
 .panel-head h2 { font-size: 13px; font-weight: 600; margin: 0; color: var(--text); }
 .panel-sub { font-size: 11.5px; color: var(--text-faint); }
 
@@ -202,7 +219,7 @@ main { padding: 20px 28px 40px; display: flex; flex-direction: column; gap: 18px
 }
 .export-btn:hover { color: var(--tan); border-color: rgba(214,146,79,0.5); }
 
-.panel-head-actions { display: flex; align-items: center; gap: 10px; }
+.panel-head-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
 /* ── Login hero ──────────────────────────────────────── */
 
@@ -215,8 +232,8 @@ main { padding: 20px 28px 40px; display: flex; flex-direction: column; gap: 18px
 
 /* ── KPI row: now 5 tiles, plus comparison deltas ───────── */
 
-.kpi-row { grid-template-columns: repeat(5, 1fr); }
-@media (max-width: 1200px) { .kpi-row { grid-template-columns: repeat(3, 1fr); } }
+.kpi-row { grid-template-columns: repeat(6, 1fr); }
+@media (max-width: 1300px) { .kpi-row { grid-template-columns: repeat(3, 1fr); } }
 @media (max-width: 700px) { .kpi-row { grid-template-columns: repeat(2, 1fr); } }
 
 .kpi-delta { font-size: 11px; margin-top: 4px; font-family: 'IBM Plex Mono', monospace; }
@@ -374,3 +391,125 @@ main { padding: 20px 28px 40px; display: flex; flex-direction: column; gap: 18px
   color: var(--text-dim);
   margin-top: 3px;
 }
+
+.sales-mix-sub { font-size: 10.5px; color: var(--text-faint); margin-top: 3px; }
+
+.category-card-total {
+  background: rgba(255,255,255,0.03);
+}
+.category-card-total .category-name { color: var(--text-dim); font-weight: 600; }
+.category-card-total .category-value { color: var(--text); }
+.category-value.gallons { color: var(--cyan); }
+
+.header-btn {
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  color: var(--text-dim);
+  border-radius: 5px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.header-btn:hover { border-color: #33456A; }
+
+/* ── Generic 2-column responsive grid (Busiest Hours / Days, etc.) ─── */
+.two-col-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+@media (max-width: 800px) {
+  .two-col-grid { grid-template-columns: 1fr; }
+}
+
+/* ── Horizontal scroll containment for wide tables on mobile ───────── */
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.table-scroll .sortable-table,
+.table-scroll .merch-table {
+  min-width: 480px;
+}
+
+/* ── Transaction detail modal ────────────────────────────── */
+
+.txn-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 9, 16, 0.6);
+  backdrop-filter: blur(2px);
+  z-index: 100;
+  display: flex;
+  justify-content: flex-end;
+  animation: fadeIn 0.15s ease;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+.txn-modal {
+  background: var(--panel);
+  border-left: 1px solid var(--panel-border);
+  width: 420px;
+  max-width: 100vw;
+  height: 100%;
+  overflow-y: auto;
+  padding: 20px 22px;
+  box-shadow: -8px 0 30px rgba(0,0,0,0.35);
+  animation: slideIn 0.18s ease;
+}
+@keyframes slideIn { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+@media (max-width: 640px) {
+  .txn-modal-backdrop { justify-content: center; align-items: flex-end; }
+  .txn-modal { width: 100%; height: 85vh; border-left: none; border-top: 1px solid var(--panel-border); border-radius: 14px 14px 0 0; }
+}
+
+.txn-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+.txn-modal-title { font-size: 16px; font-weight: 600; color: var(--text); }
+.txn-modal-date { font-size: 12px; color: var(--text-dim); margin-top: 3px; }
+.txn-modal-close {
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.txn-modal-close:hover { color: var(--text); }
+
+.txn-modal-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 16px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--panel-border);
+}
+.txn-field { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
+.txn-field > span:first-child { color: var(--text-dim); }
+.txn-field > span:last-child { color: var(--text); font-weight: 500; }
+.txn-field-total > span:last-child { color: var(--up); font-size: 16px; font-weight: 600; }
+
+.txn-lines-header {
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+  margin-bottom: 8px;
+}
+.txn-modal-footer {
+  display: flex;
+  justify-content: space-between;
+  padding-top: 10px;
+  margin-top: 6px;
+  border-top: 2px solid var(--panel-border);
+  font-weight: 600;
+  font-size: 14px;
+}
+.txn-modal-footer span:last-child { color: var(--up); }

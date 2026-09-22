@@ -10,7 +10,7 @@
  */
 
 import { neon } from "@neondatabase/serverless";
-import type { Transaction } from "./tlogParser";
+import type { Transaction, VoidEvent } from "./tlogParser";
 import crypto from "crypto";
 
 function sql() {
@@ -27,6 +27,7 @@ export async function initSchema() {
       source_file     TEXT,
       trans_type      TEXT,
       pos_num         INTEGER,
+      tr_seq          TEXT,
       date            TIMESTAMPTZ NOT NULL,
       cashier         TEXT,
       till            INTEGER,
@@ -36,6 +37,7 @@ export async function initSchema() {
       ingested_at     TIMESTAMPTZ DEFAULT now()
     )
   `;
+  await db`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS tr_seq TEXT`;
   await db`CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date)`;
 
   await db`
@@ -83,6 +85,20 @@ export async function initSchema() {
   `;
   // Safe to run even if the table already existed before this column was added.
   await db`ALTER TABLE processed_files ADD COLUMN IF NOT EXISTS modified_time TEXT`;
+
+  // Deliberately its own table, not folded into `transactions` - a void
+  // carries no real sale, so keeping it fully separate means no existing
+  // revenue/transaction-count query needs to remember to filter it back
+  // out (the same class of mistake that caused the fuel-deposit
+  // double-counting bug already fixed once in the parser).
+  await db`
+    CREATE TABLE IF NOT EXISTS void_events (
+      unique_id       TEXT PRIMARY KEY,
+      date            TIMESTAMPTZ NOT NULL,
+      source_file     TEXT
+    )
+  `;
+  await db`CREATE INDEX IF NOT EXISTS idx_void_events_date ON void_events(date)`;
 }
 
 export function fileHash(raw: Buffer): string {
@@ -124,6 +140,31 @@ export async function markFileProcessed(
   `;
 }
 
+export async function ingestVoidEvents(voidEvents: VoidEvent[]): Promise<number> {
+  if (voidEvents.length === 0) return 0;
+  const db = sql();
+  const rows = await db.query(
+    `INSERT INTO void_events (unique_id, date, source_file)
+     SELECT * FROM unnest($1::text[], $2::timestamptz[], $3::text[])
+     ON CONFLICT (unique_id) DO NOTHING
+     RETURNING unique_id`,
+    [
+      voidEvents.map((v) => v.unique_id),
+      voidEvents.map((v) => v.date),
+      voidEvents.map((v) => v.source_file),
+    ]
+  );
+  return (rows as any[]).length;
+}
+
+export async function getVoidCount(start: string, end: string): Promise<number> {
+  const db = sql();
+  const [row] = await db`
+    SELECT COUNT(*)::int AS c FROM void_events WHERE date >= ${start} AND date < ${end}
+  `;
+  return row.c as number;
+}
+
 export async function ingestTransactions(transactions: Transaction[]): Promise<number> {
   if (transactions.length === 0) return 0;
   const db = sql();
@@ -142,11 +183,11 @@ export async function ingestTransactions(transactions: Transaction[]): Promise<n
   // Step 2: bulk-insert all new transactions in ONE query via unnest().
   await db.query(
     `INSERT INTO transactions
-       (unique_id, source_file, trans_type, pos_num, date, cashier, till,
+       (unique_id, source_file, trans_type, pos_num, tr_seq, date, cashier, till,
         total_no_tax, total_with_tax, total_tax)
      SELECT * FROM unnest(
-       $1::text[], $2::text[], $3::text[], $4::int[], $5::timestamptz[],
-       $6::text[], $7::int[], $8::numeric[], $9::numeric[], $10::numeric[]
+       $1::text[], $2::text[], $3::text[], $4::int[], $5::text[], $6::timestamptz[],
+       $7::text[], $8::int[], $9::numeric[], $10::numeric[], $11::numeric[]
      )
      ON CONFLICT (unique_id) DO NOTHING`,
     [
@@ -154,6 +195,7 @@ export async function ingestTransactions(transactions: Transaction[]): Promise<n
       newTxns.map((t) => t.source_file),
       newTxns.map((t) => t.trans_type),
       newTxns.map((t) => t.pos_num),
+      newTxns.map((t) => t.tr_seq),
       newTxns.map((t) => t.date),
       newTxns.map((t) => t.cashier),
       newTxns.map((t) => t.till),
@@ -239,13 +281,13 @@ export async function ingestTransactions(transactions: Transaction[]): Promise<n
 export async function getLiveFeed(limit = 50) {
   const db = sql();
   const rows = await db`
-    SELECT unique_id, trans_type, pos_num, date, cashier, total_with_tax
+    SELECT unique_id, trans_type, pos_num, tr_seq, date, cashier, total_with_tax
     FROM transactions ORDER BY date DESC LIMIT ${limit}
   `;
   const out = [];
   for (const r of rows) {
     const lines = await db`
-      SELECT description, category, is_fuel, fuel_grade, fuel_volume, pump_number, line_total
+      SELECT description, category, dept_number, qty, unit_price, is_fuel, fuel_grade, fuel_volume, pump_number, line_total
       FROM transaction_lines WHERE unique_id = ${r.unique_id as string}
     `;
     const payments = await db`
@@ -256,6 +298,8 @@ export async function getLiveFeed(limit = 50) {
       total_with_tax: Number(r.total_with_tax),
       lines: lines.map((l) => ({
         ...l,
+        qty: l.qty === null ? null : Number(l.qty),
+        unit_price: l.unit_price === null ? null : Number(l.unit_price),
         fuel_volume: l.fuel_volume === null ? null : Number(l.fuel_volume),
         line_total: l.line_total === null ? null : Number(l.line_total),
       })),
@@ -326,15 +370,15 @@ export async function getFuelByGrade(start: string, end: string) {
   return rows.map((r) => ({ ...r, gallons: Number(r.gallons), revenue: Number(r.revenue) }));
 }
 
-export async function getMerchByDepartment(start: string, end: string, limit = 15) {
+export async function getMerchByDepartment(start: string, end: string, limit = 50) {
   const db = sql();
   const rows = await db`
-    SELECT l.description AS item, l.dept_number AS dept,
+    SELECT l.description AS item, l.dept_number AS dept, l.category AS category,
            COALESCE(SUM(l.qty), 0) AS qty,
            COALESCE(SUM(l.line_total), 0) AS revenue
     FROM transaction_lines l JOIN transactions t ON t.unique_id = l.unique_id
     WHERE l.is_fuel = false AND t.date >= ${start} AND t.date < ${end}
-    GROUP BY l.description, l.dept_number ORDER BY revenue DESC LIMIT ${limit}
+    GROUP BY l.description, l.dept_number, l.category ORDER BY revenue DESC LIMIT ${limit}
   `;
   return rows.map((r) => ({ ...r, qty: Number(r.qty), revenue: Number(r.revenue) }));
 }
@@ -360,6 +404,39 @@ export async function getMerchByCategory(start: string, end: string) {
     [start, end, MERCH_EXCLUDED_CATEGORIES]
   );
   return (rows as any[]).map((r) => ({ ...r, revenue: Number(r.revenue) }));
+}
+
+/** Lottery breakdown (Scratch Off, Lottery/Lotto, Paid Out, and the Net
+ * figure used to compute "Inside Sales, ex-lottery"). Formula confirmed
+ * directly against the reference spreadsheet: Scratch ($25) + Lottery
+ * ($6) - Paid Out ($17) = Net Lottery ($14), which matches exactly. Paid
+ * Out amounts are stored as negative in the raw TLog data (confirmed by
+ * the reference Apps Script's Math.abs() usage), so ABS() is applied the
+ * same way here. */
+export async function getLotteryBreakdown(start: string, end: string) {
+  const db = sql();
+  const rows = await db.query(
+    `SELECT l.category AS category, COALESCE(SUM(l.line_total), 0) AS amount
+     FROM transaction_lines l JOIN transactions t ON t.unique_id = l.unique_id
+     WHERE t.date >= $1 AND t.date < $2
+       AND l.category = ANY($3::text[])
+     GROUP BY l.category`,
+    [start, end, ["SCRATCH OFF", "LOTTERY", "LOTTERY PO"]]
+  );
+  const byCategory: Record<string, number> = {};
+  for (const r of rows as any[]) byCategory[r.category] = Number(r.amount);
+
+  const scratchSales = byCategory["SCRATCH OFF"] ?? 0;
+  const lotterySales = byCategory["LOTTERY"] ?? 0;
+  const paidOut = Math.abs(byCategory["LOTTERY PO"] ?? 0);
+  const netLottery = scratchSales + lotterySales - paidOut;
+
+  return {
+    scratch_sales: scratchSales,
+    lottery_sales: lotterySales,
+    paid_out: paidOut,
+    net_lottery: netLottery,
+  };
 }
 
 export async function getPaymentMix(start: string, end: string) {

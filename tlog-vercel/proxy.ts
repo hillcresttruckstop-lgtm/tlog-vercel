@@ -37,9 +37,10 @@ export async function proxy(req: NextRequest) {
 }
 
 export const config = {
-  // Run on everything except Next's internal assets, favicon, and static
-  // image files under /public - those need to load on the LOGIN PAGE
-  // ITSELF, before anyone is authenticated (the login screen's own logo
-  // is one of them), so they can't be behind the same gate as real data.
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\.(?:png|jpg|jpeg|svg|ico|webp|gif)$).*)"],
+  // Run on everything except Next's internal assets, favicon, static image
+  // files, and the web app manifest under /public - those need to load
+  // without any login context (the manifest specifically is fetched by
+  // the browser/OS itself when deciding whether "Add to Home Screen" is
+  // available, which happens with no session at all).
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|manifest\\.webmanifest|.*\\.(?:png|jpg|jpeg|svg|ico|webp|gif)$).*)"],
 };

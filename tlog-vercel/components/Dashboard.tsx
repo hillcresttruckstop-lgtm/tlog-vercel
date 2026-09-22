@@ -69,6 +69,9 @@ function downloadCSV(filename: string, rows: Record<string, unknown>[]) {
 interface FeedLine {
   description: string | null;
   category: string | null;
+  dept_number: string | null;
+  qty: number | null;
+  unit_price: number | null;
   is_fuel: boolean;
   fuel_grade: string | null;
   fuel_volume: number | null;
@@ -82,6 +85,8 @@ interface FeedPayment {
 interface FeedItem {
   unique_id: string;
   trans_type: string;
+  pos_num: number | null;
+  tr_seq: string | null;
   date: string;
   cashier: string | null;
   total_with_tax: number;
@@ -147,15 +152,22 @@ export default function Dashboard() {
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [status, setStatus] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [paymentFilter, setPaymentFilter] = useState("all");
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [selectedTxn, setSelectedTxn] = useState<FeedItem | null>(null);
   const [secondsLeft, setSecondsLeft] = useState(REFRESH_MS / 1000);
   const [ledgerSort, setLedgerSort] = useState<{ col: string; dir: "asc" | "desc" }>({
     col: "day",
     dir: "desc",
   });
+  const [merchSort, setMerchSort] = useState<{ col: string; dir: "asc" | "desc" }>({
+    col: "revenue",
+    dir: "desc",
+  });
+  const [merchCategoryFilter, setMerchCategoryFilter] = useState("all");
   const knownIds = useRef<Set<string>>(new Set());
   const firstLoad = useRef(true);
 
@@ -179,6 +191,30 @@ export default function Dashboard() {
       setError("connection error — retrying…");
     }
   }, [range, customStart, customEnd]);
+
+  async function handleSync() {
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const res = await fetch("/api/sync", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        setSyncResult(`Sync failed: ${data.error || "unknown error"}`);
+      } else {
+        setSyncResult(
+          data.new_transactions > 0
+            ? `Synced — ${data.new_transactions} new transaction${data.new_transactions === 1 ? "" : "s"}`
+            : "Synced — up to date, nothing new"
+        );
+        await refresh();
+      }
+    } catch {
+      setSyncResult("Sync failed — connection error");
+    } finally {
+      setSyncing(false);
+      setTimeout(() => setSyncResult(null), 5000);
+    }
+  }
 
   useEffect(() => {
     refresh();
@@ -240,6 +276,30 @@ export default function Dashboard() {
     );
   }
 
+  const merchCategories = useMemo(() => {
+    const set = new Set<string>();
+    for (const row of summary?.merch ?? []) if (row.category) set.add(row.category);
+    return Array.from(set).sort();
+  }, [summary]);
+
+  const sortedMerch = useMemo(() => {
+    let rows: any[] = summary?.merch ?? [];
+    if (merchCategoryFilter !== "all") rows = rows.filter((r) => r.category === merchCategoryFilter);
+    const { col, dir } = merchSort;
+    return [...rows].sort((a, b) => {
+      const av = a[col];
+      const bv = b[col];
+      if (typeof av === "string") return dir === "asc" ? (av ?? "").localeCompare(bv ?? "") : (bv ?? "").localeCompare(av ?? "");
+      return dir === "asc" ? (av ?? 0) - (bv ?? 0) : (bv ?? 0) - (av ?? 0);
+    });
+  }, [summary, merchSort, merchCategoryFilter]);
+
+  function toggleMerchSort(col: string) {
+    setMerchSort((prev) =>
+      prev.col === col ? { col, dir: prev.dir === "asc" ? "desc" : "asc" } : { col, dir: col === "item" ? "asc" : "desc" }
+    );
+  }
+
   return (
     <>
       <header className="topbar">
@@ -253,40 +313,45 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="status">
-          {error
-            ? error
-            : status
-            ? status.total_transactions > 0
-              ? `${status.total_transactions.toLocaleString()} txns tracked${
-                  status.last_transaction_date
-                    ? " · last sale " + new Date(status.last_transaction_date).toLocaleTimeString()
-                    : ""
-                }`
-              : "waiting for first TLog file to be ingested…"
-            : "connecting…"}
+          <span>
+            {error
+              ? error
+              : status
+              ? status.total_transactions > 0
+                ? `${status.total_transactions.toLocaleString()} txns tracked${
+                    status.last_transaction_date
+                      ? " · last sale " + new Date(status.last_transaction_date).toLocaleTimeString()
+                      : ""
+                  }`
+                : "waiting for first TLog file to be ingested…"
+              : "connecting…"}
+          </span>
           <span className="refresh-track" title={`Refreshing in ${secondsLeft}s`}>
             <span
               className="refresh-fill"
               style={{ width: `${(secondsLeft / (REFRESH_MS / 1000)) * 100}%` }}
             />
           </span>
-          <span className={`pulse-dot ${status?.total_transactions > 0 ? "live" : ""}`} style={{ marginLeft: 10 }} />
+          <span className={`pulse-dot ${status?.total_transactions > 0 ? "live" : ""}`} />
+          {syncResult && (
+            <span style={{ fontSize: 11, color: syncResult.startsWith("Sync failed") ? "var(--rose)" : "var(--up)" }}>
+              {syncResult}
+            </span>
+          )}
+          <button
+            onClick={handleSync}
+            disabled={syncing}
+            className="header-btn"
+            style={{ color: syncing ? "var(--text-faint)" : "var(--amber)", cursor: syncing ? "default" : "pointer" }}
+          >
+            {syncing ? "Syncing…" : "↻ Sync"}
+          </button>
           <button
             onClick={async () => {
               await fetch("/api/logout", { method: "POST" });
               window.location.href = "/login";
             }}
-            style={{
-              marginLeft: 14,
-              background: "transparent",
-              border: "1px solid var(--panel-border)",
-              color: "var(--text-dim)",
-              borderRadius: 5,
-              padding: "5px 10px",
-              fontSize: 11.5,
-              fontFamily: "inherit",
-              cursor: "pointer",
-            }}
+            className="header-btn"
           >
             Sign out
           </button>
@@ -354,13 +419,17 @@ export default function Dashboard() {
             <div className="kpi-label">Tax Collected</div>
             <div className="kpi-value mono">{kpis ? fmtMoney(kpis.tax_collected) : "—"}</div>
           </div>
+          <div className="kpi" style={{ ["--accent" as any]: "var(--rose)" }}>
+            <div className="kpi-label">Voids</div>
+            <div className="kpi-value mono">{kpis ? fmtNum(kpis.void_count ?? 0) : "—"}</div>
+          </div>
         </section>
 
         {kpis && kpis.revenue > 0 && (
           <section className="panel sales-mix">
             <div className="panel-head">
               <h2>Inside vs. outside sales</h2>
-              <span className="panel-sub">inside = merchandise, outside = fuel at the pump</span>
+              <span className="panel-sub">inside = merchandise (ex-lottery), outside = fuel at the pump</span>
             </div>
             <div className="sales-mix-bar">
               <div
@@ -371,7 +440,7 @@ export default function Dashboard() {
               <div
                 className="sales-mix-segment inside"
                 style={{ width: `${(kpis.merch_revenue / kpis.revenue) * 100}%` }}
-                title={`Inside (merch): ${fmtMoney(kpis.merch_revenue)}`}
+                title={`Inside (merch, all): ${fmtMoney(kpis.merch_revenue)}`}
               />
             </div>
             <div className="sales-mix-legend">
@@ -388,10 +457,16 @@ export default function Dashboard() {
               <div className="sales-mix-stat">
                 <span className="sales-mix-dot inside" />
                 <div>
-                  <div className="sales-mix-label">Inside sale (merchandise)</div>
+                  <div className="sales-mix-label">Inside sale (ex-lottery)</div>
                   <div className="sales-mix-value mono">
-                    {fmtMoney(kpis.merch_revenue)}
-                    <span className="sales-mix-pct"> · {((kpis.merch_revenue / kpis.revenue) * 100).toFixed(1)}%</span>
+                    {fmtMoney(kpis.inside_sales_ex_lottery ?? kpis.merch_revenue)}
+                    <span className="sales-mix-pct">
+                      {" "}
+                      · {(((kpis.inside_sales_ex_lottery ?? kpis.merch_revenue) / kpis.revenue) * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                  <div className="sales-mix-sub">
+                    All merch (incl. lottery): {fmtMoney(kpis.merch_revenue)}
                   </div>
                 </div>
               </div>
@@ -466,7 +541,7 @@ export default function Dashboard() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
-            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
               <select
                 className="feed-filter-select"
                 value={typeFilter}
@@ -508,7 +583,6 @@ export default function Dashboard() {
               {filteredFeed.map((item) => {
                 const { chip, label } = feedDescription(item);
                 const isNew = !firstLoad.current && !knownIds.current.has(item.unique_id);
-                const isOpen = expandedId === item.unique_id;
                 const time = new Date(item.date).toLocaleTimeString([], {
                   hour: "numeric",
                   minute: "2-digit",
@@ -518,7 +592,7 @@ export default function Dashboard() {
                   <div
                     key={item.unique_id}
                     className={`feed-row ${isNew ? "new" : ""}`}
-                    onClick={() => setExpandedId(isOpen ? null : item.unique_id)}
+                    onClick={() => setSelectedTxn(item)}
                   >
                     <div className="feed-row-main">
                       <div className="feed-left">
@@ -533,25 +607,6 @@ export default function Dashboard() {
                       </div>
                       <div className="feed-amount">{fmtMoney(item.total_with_tax)}</div>
                     </div>
-                    {isOpen && (
-                      <div className="feed-detail" onClick={(e) => e.stopPropagation()}>
-                        {item.lines.map((l, i) => (
-                          <div className="feed-detail-row" key={i}>
-                            <span>
-                              {l.description}
-                              {l.is_fuel && l.fuel_volume ? ` (${l.fuel_volume.toFixed(3)} gal)` : ""}
-                            </span>
-                            <span>{fmtMoney(l.line_total || 0)}</span>
-                          </div>
-                        ))}
-                        {item.payments.map((p, i) => (
-                          <div className="feed-detail-row" key={`pay-${i}`}>
-                            <span>Paid via {p.tender_type}</span>
-                            <span>{fmtMoney(p.amount)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
                   </div>
                 );
               })}
@@ -644,6 +699,15 @@ export default function Dashboard() {
                   <div className="category-count">{fmtNum(c.sale_count)} sale{c.sale_count === 1 ? "" : "s"}</div>
                 </div>
               ))}
+              {kpis && (
+                <div className="category-card category-card-total">
+                  <div className="category-name">Merch Sales</div>
+                  <div className="category-value mono">{fmtMoney(kpis.merch_revenue)}</div>
+                  <div className="category-count">
+                    Inside: {fmtMoney(kpis.inside_sales_ex_lottery ?? kpis.merch_revenue)}
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
             <div className="empty-note">No merchandise sales in this range yet.</div>
@@ -652,25 +716,71 @@ export default function Dashboard() {
 
         <section className="panel">
           <div className="panel-head">
-            <h2>Top merchandise</h2>
-            <button className="export-btn" onClick={() => downloadCSV(`top-merchandise-${range}.csv`, summary?.merch || [])}>
-              Export CSV
-            </button>
+            <h2>Gallons pumped — live</h2>
+            <span className="panel-sub">by grade, current range</span>
           </div>
-          <table className="merch-table">
+          {summary?.fuel_by_grade?.length ? (
+            <div className="category-grid">
+              {summary.fuel_by_grade.map((f: any) => (
+                <div className="category-card" key={f.grade}>
+                  <div className="category-name">{f.grade}</div>
+                  <div className="category-value mono gallons">{fmtNum(f.gallons, 3)}</div>
+                  <div className="category-count">
+                    {fmtMoney(f.revenue)} · ${f.gallons > 0 ? (f.revenue / f.gallons).toFixed(3) : "0.000"}/gal
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-note">No fuel sales in this range yet.</div>
+          )}
+        </section>
+
+        <section className="panel">
+          <div className="panel-head">
+            <h2>Top merchandise</h2>
+            <div className="panel-head-actions">
+              <select
+                className="feed-filter-select"
+                value={merchCategoryFilter}
+                onChange={(e) => setMerchCategoryFilter(e.target.value)}
+                style={{ flex: "none", width: "auto" }}
+              >
+                <option value="all">All categories</option>
+                {merchCategories.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+              <button className="export-btn" onClick={() => downloadCSV(`top-merchandise-${range}.csv`, sortedMerch)}>
+                Export CSV
+              </button>
+            </div>
+          </div>
+          <div className="table-scroll">
+          <table className="sortable-table">
             <thead>
               <tr>
-                <th>Item</th>
-                <th>Dept</th>
-                <th>Qty sold</th>
-                <th>Revenue</th>
+                {[
+                  ["item", "Item"],
+                  ["category", "Category"],
+                  ["dept", "Dept"],
+                  ["qty", "Qty sold"],
+                  ["revenue", "Revenue"],
+                ].map(([key, label]) => (
+                  <th key={key} className={merchSort.col === key ? "sorted" : ""} onClick={() => toggleMerchSort(key)}>
+                    {label} {merchSort.col === key ? (merchSort.dir === "asc" ? "↑" : "↓") : ""}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
-              {summary?.merch?.length ? (
-                summary.merch.map((row: any, i: number) => (
+              {sortedMerch.length ? (
+                sortedMerch.map((row: any, i: number) => (
                   <tr key={i}>
                     <td>{row.item ?? "—"}</td>
+                    <td>{row.category ?? "—"}</td>
                     <td>{row.dept ?? "—"}</td>
                     <td>{fmtNum(row.qty, row.qty % 1 ? 2 : 0)}</td>
                     <td>{fmtMoney(row.revenue)}</td>
@@ -678,16 +788,17 @@ export default function Dashboard() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={4} className="empty-note">
+                  <td colSpan={5} className="empty-note">
                     No merchandise sales in this range yet.
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
+          </div>
         </section>
 
-        <section className="tri-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+        <section className="two-col-grid">
           <div className="panel">
             <div className="panel-head">
               <h2>Busiest hours</h2>
@@ -739,6 +850,7 @@ export default function Dashboard() {
               </button>
             </div>
           </div>
+          <div className="table-scroll">
           <table className="sortable-table">
             <thead>
               <tr>
@@ -781,6 +893,7 @@ export default function Dashboard() {
               )}
             </tbody>
           </table>
+          </div>
         </section>
 
         <section className="panel">
@@ -788,6 +901,7 @@ export default function Dashboard() {
             <h2>Repeat customers</h2>
             <span className="panel-sub">cards seen 2+ times in this range, by last 4 digits</span>
           </div>
+          <div className="table-scroll">
           <table className="sortable-table">
             <thead>
               <tr>
@@ -816,8 +930,91 @@ export default function Dashboard() {
               )}
             </tbody>
           </table>
+          </div>
         </section>
       </main>
+
+      {selectedTxn && (
+        <div className="txn-modal-backdrop" onClick={() => setSelectedTxn(null)}>
+          <div className="txn-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="txn-modal-header">
+              <div>
+                <div className="txn-modal-title">
+                  Transaction #{selectedTxn.tr_seq || selectedTxn.unique_id.slice(-7)}
+                </div>
+                <div className="txn-modal-date">
+                  {new Date(selectedTxn.date).toLocaleString([], {
+                    dateStyle: "medium",
+                    timeStyle: "medium",
+                  })}
+                </div>
+              </div>
+              <button className="txn-modal-close" onClick={() => setSelectedTxn(null)} aria-label="Close">
+                ×
+              </button>
+            </div>
+
+            <div className="txn-modal-fields">
+              <div className="txn-field">
+                <span>Type</span>
+                <span className={`chip ${feedType(selectedTxn)}`}>{feedType(selectedTxn)}</span>
+              </div>
+              {selectedTxn.pos_num != null && (
+                <div className="txn-field">
+                  <span>Register</span>
+                  <span>Reg {selectedTxn.pos_num}</span>
+                </div>
+              )}
+              {selectedTxn.cashier && (
+                <div className="txn-field">
+                  <span>Cashier</span>
+                  <span>{selectedTxn.cashier}</span>
+                </div>
+              )}
+              <div className="txn-field">
+                <span>Tender</span>
+                <span>{selectedTxn.payments.map((p) => p.tender_type).join(", ") || "—"}</span>
+              </div>
+              <div className="txn-field txn-field-total">
+                <span>Charged Total</span>
+                <span className="mono">{fmtMoney(selectedTxn.total_with_tax)}</span>
+              </div>
+            </div>
+
+            <div className="txn-modal-lines">
+              <div className="txn-lines-header">Line Items</div>
+              <div className="table-scroll">
+                <table className="sortable-table">
+                  <thead>
+                    <tr>
+                      <th>Item</th>
+                      <th>Dept</th>
+                      <th>Qty</th>
+                      <th>Price</th>
+                      <th>Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedTxn.lines.map((l, i) => (
+                      <tr key={i}>
+                        <td>{l.is_fuel ? l.fuel_grade || l.description : l.description}</td>
+                        <td>{l.is_fuel ? "FUEL" : l.category ?? l.dept_number ?? "—"}</td>
+                        <td>{l.is_fuel ? fmtNum(l.fuel_volume ?? 0, 3) : fmtNum(l.qty ?? 0, (l.qty ?? 0) % 1 ? 2 : 0)}</td>
+                        <td>{l.unit_price != null ? `$${l.unit_price.toFixed(3)}` : "—"}</td>
+                        <td>{fmtMoney(l.line_total ?? 0)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="txn-modal-footer">
+                <span>Charged Total</span>
+                <span className="mono">{fmtMoney(selectedTxn.total_with_tax)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
