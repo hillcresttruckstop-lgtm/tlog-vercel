@@ -31,6 +31,14 @@ export interface TxnLine {
   fuel_grade: string | null;
   fuel_volume: number | null;
   pump_number: number | null;
+  // An item rung up then voided WITHIN an otherwise-normal, completed
+  // sale (VeriFone tags the line itself type="void plu", distinct from a
+  // whole transaction being void). Confirmed real: the voided line
+  // carries a NEGATIVE line_total that exactly cancels the earlier
+  // positive line for the same item, so totals are already correct
+  // without any special handling - this flag exists purely so these can
+  // be surfaced as their own "Void Lines" list, not to change any sum.
+  is_void_line: boolean;
 }
 
 export interface TxnPayment {
@@ -183,6 +191,9 @@ function parseOneTrans(trans: any, sourceFile: string): Transaction | null {
   const rawLineList = trLines ? asArray(trLines.trLine) : [];
 
   for (const line of rawLineList) {
+    const lineType: string = line["@_type"] ?? "";
+    const isVoidLine = lineType.startsWith("void ");
+
     const dept = line.trlDept;
     const deptNumber = dept ? dept["@_number"] ?? null : null;
     const deptType = dept ? dept["@_type"] ?? null : null;
@@ -232,6 +243,7 @@ function parseOneTrans(trans: any, sourceFile: string): Transaction | null {
       fuel_grade: fuelGrade,
       fuel_volume: fuelVolume,
       pump_number: pumpNumber,
+      is_void_line: isVoidLine,
     });
   }
 
@@ -268,15 +280,18 @@ function parseOneTrans(trans: any, sourceFile: string): Transaction | null {
   };
 }
 
-export interface VoidEvent {
-  unique_id: string;
-  date: string;
-  source_file: string;
-}
+// A void ticket has the exact same shape as a normal Transaction (full
+// header, totals, and line items) - VeriFone tags it type="void" but
+// otherwise structures it identically, confirmed against real data. Reusing
+// the Transaction shape (rather than a separate lightweight record) is what
+// lets a void ticket be displayed with the same detail view as any other
+// transaction - the whole point of surfacing them as real "tickets," not
+// just a bare count.
+export type VoidTicket = Transaction;
 
 export interface ParseResult {
   transactions: Transaction[];
-  voidEvents: VoidEvent[];
+  voidTickets: VoidTicket[];
 }
 
 export function parseTlog(rawBytes: Buffer, sourceFile: string): ParseResult {
@@ -297,25 +312,21 @@ export function parseTlog(rawBytes: Buffer, sourceFile: string): ParseResult {
 
   // PASS 2: process real sales, applying every exclusion in the same
   // order as the reference implementation. "void" transactions are
-  // tracked SEPARATELY (voidEvents) rather than mixed into the same list
+  // tracked SEPARATELY (voidTickets) rather than mixed into the same list
   // as real sales - keeping them fully separate means no existing
   // revenue/transaction-count query needs to remember to filter them
   // back out, which is exactly the kind of easy-to-forget mistake that
   // caused the fuel-deposit double-counting bug this parser already
   // fixed once.
   const out: Transaction[] = [];
-  const voidEvents: VoidEvent[] = [];
+  const voidTickets: VoidTicket[] = [];
 
   for (const trans of allTrans) {
     const type = trans["@_type"];
 
     if (type === "void") {
-      const header = trans.trHeader;
-      const uniqueId = header ? textOf(header.uniqueID) : null;
-      const dateStr = header ? textOf(header.date) : null;
-      if (uniqueId && dateStr) {
-        voidEvents.push({ unique_id: uniqueId, date: dateStr, source_file: sourceFile });
-      }
+      const parsed = parseOneTrans(trans, sourceFile);
+      if (parsed) voidTickets.push(parsed);
       continue;
     }
 
@@ -342,5 +353,5 @@ export function parseTlog(rawBytes: Buffer, sourceFile: string): ParseResult {
     const parsed = parseOneTrans(trans, sourceFile);
     if (parsed) out.push(parsed);
   }
-  return { transactions: out, voidEvents };
+  return { transactions: out, voidTickets };
 }

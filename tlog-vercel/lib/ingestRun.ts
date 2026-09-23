@@ -15,7 +15,7 @@ import {
   fileHash,
   getKnownModifiedTime,
   ingestTransactions,
-  ingestVoidEvents,
+  ingestVoidTickets,
   markFileProcessed,
 } from "./db";
 
@@ -59,7 +59,7 @@ async function processOneFile(file: DriveFileRef): Promise<ProcessResult> {
   }
 
   const newCount = await ingestTransactions(parsed.transactions);
-  await ingestVoidEvents(parsed.voidEvents);
+  await ingestVoidTickets(parsed.voidTickets);
   await markFileProcessed(file.name, fileHash(raw), parsed.transactions.length, file.modifiedTime);
 
   return { file: file.name, transactions_in_file: parsed.transactions.length, new: newCount };

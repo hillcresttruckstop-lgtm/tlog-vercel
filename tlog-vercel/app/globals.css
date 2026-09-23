@@ -513,3 +513,30 @@ main { padding: 20px 28px 40px; display: flex; flex-direction: column; gap: 18px
   font-size: 14px;
 }
 .txn-modal-footer span:last-child { color: var(--up); }
+
+/* ── Voids panel & clickable KPI tile ────────────────────── */
+
+.kpi-clickable { cursor: pointer; transition: background 0.15s ease; }
+.kpi-clickable:hover { background: rgba(255,255,255,0.03); }
+
+.voids-tabs { display: flex; gap: 6px; }
+.voids-tabs button {
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  color: var(--text-dim);
+  border-radius: 5px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.voids-tabs button.active {
+  background: var(--rose);
+  color: #1a0a0f;
+  border-color: var(--rose);
+  font-weight: 600;
+}
+
+/* ── Lottery card accents ────────────────────────────────── */
+.lottery-color { color: #b48ce0; }
+.lottery-negative { color: var(--rose); }

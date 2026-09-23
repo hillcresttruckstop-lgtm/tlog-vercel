@@ -142,6 +142,121 @@ function hourLabel(hour: number) {
   return `${h}${hour < 12 ? "a" : "p"}`;
 }
 
+function VoidsPanel({
+  range,
+  customStart,
+  customEnd,
+  onSelectTxn,
+}: {
+  range: string;
+  customStart: string;
+  customEnd: string;
+  onSelectTxn: (item: any) => void;
+}) {
+  const [data, setData] = useState<{ tickets: any[]; lines: any[] } | null>(null);
+  const [tab, setTab] = useState<"tickets" | "lines">("tickets");
+
+  useEffect(() => {
+    const rangeQuery = range === "custom" ? `range=custom&start=${customStart}&end=${customEnd}` : `range=${range}`;
+    fetch(`/api/voids?${rangeQuery}`)
+      .then((r) => r.json())
+      .then(setData)
+      .catch(() => setData({ tickets: [], lines: [] }));
+  }, [range, customStart, customEnd]);
+
+  return (
+    <section className="panel voids-panel">
+      <div className="panel-head">
+        <h2>Voids</h2>
+        <div className="voids-tabs">
+          <button className={tab === "tickets" ? "active" : ""} onClick={() => setTab("tickets")}>
+            Void Tickets {data ? `(${data.tickets.length})` : ""}
+          </button>
+          <button className={tab === "lines" ? "active" : ""} onClick={() => setTab("lines")}>
+            Void Lines {data ? `(${data.lines.length})` : ""}
+          </button>
+        </div>
+      </div>
+
+      {!data ? (
+        <div className="empty-note">Loading…</div>
+      ) : tab === "tickets" ? (
+        data.tickets.length ? (
+          <div className="table-scroll">
+            <table className="sortable-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Register</th>
+                  <th>Cashier</th>
+                  <th>Items</th>
+                  <th>Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.tickets.map((t) => (
+                  <tr
+                    key={t.unique_id}
+                    onClick={() =>
+                      onSelectTxn({
+                        unique_id: t.unique_id,
+                        trans_type: "void",
+                        pos_num: t.pos_num,
+                        tr_seq: t.tr_seq,
+                        date: t.date,
+                        cashier: t.cashier,
+                        total_with_tax: t.total_with_tax,
+                        lines: t.lines ?? [],
+                        payments: [],
+                      })
+                    }
+                    style={{ cursor: "pointer" }}
+                  >
+                    <td>{new Date(t.date).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</td>
+                    <td>{t.pos_num != null ? `Reg ${t.pos_num}` : "—"}</td>
+                    <td>{t.cashier ?? "—"}</td>
+                    <td>{(t.lines ?? []).length}</td>
+                    <td>{fmtMoney(t.total_with_tax)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="empty-note">No fully-voided tickets in this range.</div>
+        )
+      ) : data.lines.length ? (
+        <div className="table-scroll">
+          <table className="sortable-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Item</th>
+                <th>Category</th>
+                <th>Ticket #</th>
+                <th>Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.lines.map((l, i) => (
+                <tr key={i}>
+                  <td>{new Date(l.date).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</td>
+                  <td>{l.description ?? "—"}</td>
+                  <td>{l.category ?? "—"}</td>
+                  <td>{l.tr_seq ?? "—"}</td>
+                  <td>{fmtMoney(l.line_total ?? 0)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="empty-note">No individually-voided line items in this range.</div>
+      )}
+    </section>
+  );
+}
+
 export default function Dashboard() {
   const [range, setRange] = useState("today");
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -158,6 +273,7 @@ export default function Dashboard() {
   const [typeFilter, setTypeFilter] = useState("all");
   const [paymentFilter, setPaymentFilter] = useState("all");
   const [selectedTxn, setSelectedTxn] = useState<FeedItem | null>(null);
+  const [voidsOpen, setVoidsOpen] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(REFRESH_MS / 1000);
   const [ledgerSort, setLedgerSort] = useState<{ col: string; dir: "asc" | "desc" }>({
     col: "day",
@@ -419,11 +535,17 @@ export default function Dashboard() {
             <div className="kpi-label">Tax Collected</div>
             <div className="kpi-value mono">{kpis ? fmtMoney(kpis.tax_collected) : "—"}</div>
           </div>
-          <div className="kpi" style={{ ["--accent" as any]: "var(--rose)" }}>
-            <div className="kpi-label">Voids</div>
+          <div
+            className="kpi kpi-clickable"
+            style={{ ["--accent" as any]: "var(--rose)" }}
+            onClick={() => setVoidsOpen((v) => !v)}
+          >
+            <div className="kpi-label">Voids {voidsOpen ? "▲" : "▾"}</div>
             <div className="kpi-value mono">{kpis ? fmtNum(kpis.void_count ?? 0) : "—"}</div>
           </div>
         </section>
+
+        {voidsOpen && <VoidsPanel range={range} customStart={customStart} customEnd={customEnd} onSelectTxn={setSelectedTxn} />}
 
         {kpis && kpis.revenue > 0 && (
           <section className="panel sales-mix">
@@ -712,6 +834,30 @@ export default function Dashboard() {
           ) : (
             <div className="empty-note">No merchandise sales in this range yet.</div>
           )}
+        </section>
+
+        <section className="panel">
+          <div className="panel-head">
+            <h2>Lottery</h2>
+          </div>
+          <div className="category-grid">
+            <div className="category-card">
+              <div className="category-name">Scratch Off</div>
+              <div className="category-value mono lottery-color">{fmtMoney(summary?.lottery?.scratch_sales ?? 0)}</div>
+            </div>
+            <div className="category-card">
+              <div className="category-name">Lottery</div>
+              <div className="category-value mono lottery-color">{fmtMoney(summary?.lottery?.lottery_sales ?? 0)}</div>
+            </div>
+            <div className="category-card">
+              <div className="category-name">Lottery PO</div>
+              <div className="category-value mono lottery-negative">-{fmtMoney(summary?.lottery?.paid_out ?? 0)}</div>
+            </div>
+            <div className="category-card category-card-total">
+              <div className="category-name">Net Lottery</div>
+              <div className="category-value mono lottery-color">{fmtMoney(summary?.lottery?.net_lottery ?? 0)}</div>
+            </div>
+          </div>
         </section>
 
         <section className="panel">

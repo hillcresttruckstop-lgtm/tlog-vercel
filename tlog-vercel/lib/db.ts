@@ -10,7 +10,7 @@
  */
 
 import { neon } from "@neondatabase/serverless";
-import type { Transaction, VoidEvent } from "./tlogParser";
+import type { Transaction, VoidTicket } from "./tlogParser";
 import crypto from "crypto";
 
 function sql() {
@@ -54,11 +54,13 @@ export async function initSchema() {
       is_fuel         BOOLEAN,
       fuel_grade      TEXT,
       fuel_volume     NUMERIC,
-      pump_number     INTEGER
+      pump_number     INTEGER,
+      is_void_line    BOOLEAN DEFAULT false
     )
   `;
   // Safe to run even if the table already existed before this column was added.
   await db`ALTER TABLE transaction_lines ADD COLUMN IF NOT EXISTS category TEXT`;
+  await db`ALTER TABLE transaction_lines ADD COLUMN IF NOT EXISTS is_void_line BOOLEAN DEFAULT false`;
   await db`CREATE INDEX IF NOT EXISTS idx_lines_unique_id ON transaction_lines(unique_id)`;
   await db`CREATE INDEX IF NOT EXISTS idx_lines_is_fuel ON transaction_lines(is_fuel)`;
   await db`CREATE INDEX IF NOT EXISTS idx_lines_category ON transaction_lines(category)`;
@@ -86,19 +88,28 @@ export async function initSchema() {
   // Safe to run even if the table already existed before this column was added.
   await db`ALTER TABLE processed_files ADD COLUMN IF NOT EXISTS modified_time TEXT`;
 
-  // Deliberately its own table, not folded into `transactions` - a void
+  // A void ticket carries full detail (register, cashier, total, line
+  // items) - lines are stored as JSON rather than a separate child table
+  // since void volume is very low (a handful per day at most), so the
+  // extra join overhead of a real child table buys nothing here. This is
+  // deliberately its own table, not folded into `transactions` - a void
   // carries no real sale, so keeping it fully separate means no existing
   // revenue/transaction-count query needs to remember to filter it back
   // out (the same class of mistake that caused the fuel-deposit
   // double-counting bug already fixed once in the parser).
   await db`
-    CREATE TABLE IF NOT EXISTS void_events (
+    CREATE TABLE IF NOT EXISTS void_transactions (
       unique_id       TEXT PRIMARY KEY,
+      tr_seq          TEXT,
+      pos_num         INTEGER,
       date            TIMESTAMPTZ NOT NULL,
+      cashier         TEXT,
+      total_with_tax  NUMERIC,
+      lines           JSONB,
       source_file     TEXT
     )
   `;
-  await db`CREATE INDEX IF NOT EXISTS idx_void_events_date ON void_events(date)`;
+  await db`CREATE INDEX IF NOT EXISTS idx_void_transactions_date ON void_transactions(date)`;
 }
 
 export function fileHash(raw: Buffer): string {
@@ -140,18 +151,23 @@ export async function markFileProcessed(
   `;
 }
 
-export async function ingestVoidEvents(voidEvents: VoidEvent[]): Promise<number> {
-  if (voidEvents.length === 0) return 0;
+export async function ingestVoidTickets(voidTickets: VoidTicket[]): Promise<number> {
+  if (voidTickets.length === 0) return 0;
   const db = sql();
   const rows = await db.query(
-    `INSERT INTO void_events (unique_id, date, source_file)
-     SELECT * FROM unnest($1::text[], $2::timestamptz[], $3::text[])
+    `INSERT INTO void_transactions (unique_id, tr_seq, pos_num, date, cashier, total_with_tax, lines, source_file)
+     SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::timestamptz[], $5::text[], $6::numeric[], $7::jsonb[], $8::text[])
      ON CONFLICT (unique_id) DO NOTHING
      RETURNING unique_id`,
     [
-      voidEvents.map((v) => v.unique_id),
-      voidEvents.map((v) => v.date),
-      voidEvents.map((v) => v.source_file),
+      voidTickets.map((v) => v.unique_id),
+      voidTickets.map((v) => v.tr_seq),
+      voidTickets.map((v) => v.pos_num),
+      voidTickets.map((v) => v.date),
+      voidTickets.map((v) => v.cashier),
+      voidTickets.map((v) => v.total_with_tax),
+      voidTickets.map((v) => JSON.stringify(v.lines)),
+      voidTickets.map((v) => v.source_file),
     ]
   );
   return (rows as any[]).length;
@@ -160,9 +176,40 @@ export async function ingestVoidEvents(voidEvents: VoidEvent[]): Promise<number>
 export async function getVoidCount(start: string, end: string): Promise<number> {
   const db = sql();
   const [row] = await db`
-    SELECT COUNT(*)::int AS c FROM void_events WHERE date >= ${start} AND date < ${end}
+    SELECT COUNT(*)::int AS c FROM void_transactions WHERE date >= ${start} AND date < ${end}
   `;
   return row.c as number;
+}
+
+/** List of void tickets for a range - enough detail for a summary row
+ * (time, register, total); the full line-item detail already sits in the
+ * `lines` JSON column and comes along for free, so a click-through needs
+ * no second query. */
+export async function getVoidTickets(start: string, end: string, limit = 100) {
+  const db = sql();
+  const rows = await db`
+    SELECT unique_id, tr_seq, pos_num, date, cashier, total_with_tax, lines
+    FROM void_transactions WHERE date >= ${start} AND date < ${end}
+    ORDER BY date DESC LIMIT ${limit}
+  `;
+  return rows.map((r) => ({ ...r, total_with_tax: Number(r.total_with_tax) }));
+}
+
+/** Individual voided LINE ITEMS from inside otherwise-normal, completed
+ * sales (VeriFone tags the line itself "void plu" - a cashier voiding one
+ * item mid-sale, distinct from an entire ticket being void). Confirmed
+ * real: the voided line carries a negative line_total that already nets
+ * correctly against the original positive line, so this is purely a
+ * transparency view - it changes no totals anywhere else. */
+export async function getVoidLines(start: string, end: string, limit = 100) {
+  const db = sql();
+  const rows = await db`
+    SELECT l.description, l.category, l.line_total, t.unique_id, t.tr_seq, t.date, t.cashier
+    FROM transaction_lines l JOIN transactions t ON t.unique_id = l.unique_id
+    WHERE l.is_void_line = true AND t.date >= ${start} AND t.date < ${end}
+    ORDER BY t.date DESC LIMIT ${limit}
+  `;
+  return rows.map((r) => ({ ...r, line_total: r.line_total === null ? null : Number(r.line_total) }));
 }
 
 export async function ingestTransactions(transactions: Transaction[]): Promise<number> {
@@ -245,6 +292,7 @@ export async function ingestTransactions(transactions: Transaction[]): Promise<n
   const lineFuelGrade: (string | null)[] = [];
   const lineFuelVolume: (number | null)[] = [];
   const linePumpNumber: (number | null)[] = [];
+  const lineIsVoid: boolean[] = [];
 
   for (const txn of confirmedNewTxns) {
     for (const line of txn.lines) {
@@ -260,20 +308,21 @@ export async function ingestTransactions(transactions: Transaction[]): Promise<n
       lineFuelGrade.push(line.fuel_grade);
       lineFuelVolume.push(line.fuel_volume);
       linePumpNumber.push(line.pump_number);
+      lineIsVoid.push(line.is_void_line);
     }
   }
   if (lineOwners.length > 0) {
     await db.query(
       `INSERT INTO transaction_lines
          (unique_id, dept_number, dept_type, category, description, qty, unit_price,
-          line_total, is_fuel, fuel_grade, fuel_volume, pump_number)
+          line_total, is_fuel, fuel_grade, fuel_volume, pump_number, is_void_line)
        SELECT * FROM unnest(
          $1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::numeric[],
-         $7::numeric[], $8::numeric[], $9::boolean[], $10::text[], $11::numeric[], $12::int[]
+         $7::numeric[], $8::numeric[], $9::boolean[], $10::text[], $11::numeric[], $12::int[], $13::boolean[]
        )`,
       [
         lineOwners, lineDeptNum, lineDeptType, lineCategory, lineDesc, lineQty,
-        lineUnitPrice, lineTotal, lineIsFuel, lineFuelGrade, lineFuelVolume, linePumpNumber,
+        lineUnitPrice, lineTotal, lineIsFuel, lineFuelGrade, lineFuelVolume, linePumpNumber, lineIsVoid,
       ]
     );
   }
