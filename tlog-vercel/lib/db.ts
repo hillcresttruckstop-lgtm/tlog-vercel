@@ -180,8 +180,27 @@ export async function ingestTransactions(transactions: Transaction[]): Promise<n
   const newTxns = transactions.filter((t) => !existingSet.has(t.unique_id));
   if (newTxns.length === 0) return 0;
 
-  // Step 2: bulk-insert all new transactions in ONE query via unnest().
-  await db.query(
+  // Step 2: bulk-insert all candidate transactions in ONE query via
+  // unnest(), and RETURNING the unique_ids that were ACTUALLY inserted.
+  //
+  // This RETURNING is what makes concurrent ingestion safe. current.1 and
+  // current.2 (Shift vs Day period exports) contain the exact same
+  // transactions - confirmed against real data (100% unique_id overlap).
+  // Both files get processed with several others running concurrently for
+  // speed. If both calls to this function separately checked "does this
+  // exist yet" (the query above) before EITHER had committed its insert,
+  // both would conclude the same batch is "new" and both would proceed to
+  // Steps 3/4 - and since transaction_lines/transaction_payments have no
+  // uniqueness constraint of their own, that silently inserted every line
+  // item TWICE, which is exactly what was inflating fuel gallons/revenue
+  // to roughly 2x the real figures (confirmed against real production
+  // data: 6,846.6 gal shown vs 3,559.060 actual, a ~1.92x ratio).
+  // ON CONFLICT DO NOTHING + RETURNING is what actually closes this: for
+  // any unique_id two concurrent inserts both attempt, Postgres guarantees
+  // only ONE of them gets it back in RETURNING - so only that one caller's
+  // Steps 3/4 below will ever insert its lines/payments, no matter how the
+  // two calls happen to interleave in real time.
+  const insertedRows = await db.query(
     `INSERT INTO transactions
        (unique_id, source_file, trans_type, pos_num, tr_seq, date, cashier, till,
         total_no_tax, total_with_tax, total_tax)
@@ -189,7 +208,8 @@ export async function ingestTransactions(transactions: Transaction[]): Promise<n
        $1::text[], $2::text[], $3::text[], $4::int[], $5::text[], $6::timestamptz[],
        $7::text[], $8::int[], $9::numeric[], $10::numeric[], $11::numeric[]
      )
-     ON CONFLICT (unique_id) DO NOTHING`,
+     ON CONFLICT (unique_id) DO NOTHING
+     RETURNING unique_id`,
     [
       newTxns.map((t) => t.unique_id),
       newTxns.map((t) => t.source_file),
@@ -204,9 +224,15 @@ export async function ingestTransactions(transactions: Transaction[]): Promise<n
       newTxns.map((t) => t.total_tax),
     ]
   );
+  const actuallyInsertedIds = new Set((insertedRows as any[]).map((r) => r.unique_id));
+  // Only these ACTUALLY got a transactions row from this call - restrict
+  // everything below to exactly this set, not the full newTxns candidate
+  // list computed before the insert.
+  const confirmedNewTxns = newTxns.filter((t) => actuallyInsertedIds.has(t.unique_id));
+  if (confirmedNewTxns.length === 0) return 0;
 
-  // Step 3: flatten every line item across ALL new transactions into
-  // parallel arrays, and bulk-insert them in ONE query.
+  // Step 3: flatten every line item across confirmed-new transactions
+  // into parallel arrays, and bulk-insert them in ONE query.
   const lineOwners: string[] = [];
   const lineDeptNum: (string | null)[] = [];
   const lineDeptType: (string | null)[] = [];
@@ -220,7 +246,7 @@ export async function ingestTransactions(transactions: Transaction[]): Promise<n
   const lineFuelVolume: (number | null)[] = [];
   const linePumpNumber: (number | null)[] = [];
 
-  for (const txn of newTxns) {
+  for (const txn of confirmedNewTxns) {
     for (const line of txn.lines) {
       lineOwners.push(txn.unique_id);
       lineDeptNum.push(line.dept_number);
@@ -257,7 +283,7 @@ export async function ingestTransactions(transactions: Transaction[]): Promise<n
   const payTender: string[] = [];
   const payAmount: (number | null)[] = [];
   const payCard: (string | null)[] = [];
-  for (const txn of newTxns) {
+  for (const txn of confirmedNewTxns) {
     for (const pay of txn.payments) {
       payOwners.push(txn.unique_id);
       payTender.push(pay.tender_type);
