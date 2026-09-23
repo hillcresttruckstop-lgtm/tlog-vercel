@@ -57,19 +57,22 @@ export async function GET(req: NextRequest) {
   `;
 
   // 3. The real tie-out check: for each transaction, does the sum of its
-  // own lines (fuel + merch) roughly match its own recorded total? A
-  // transaction with duplicated lines will show a line-sum far above its
-  // own total_with_tax - the exact smoking gun, not an aggregate guess.
+  // own lines (fuel + merch) roughly match its own recorded PRE-TAX total?
+  // Comparing against total_with_tax instead of total_no_tax was an
+  // earlier bug in this diagnostic itself - it flagged every transaction
+  // with sales tax on it as a false-positive "mismatch," when that gap is
+  // just tax, not duplication. total_no_tax is the correct comparison,
+  // since transaction_lines.line_total never includes tax.
   const tieOutIssues = await db.query(
-    `SELECT t.unique_id, t.tr_seq, t.date, t.total_with_tax,
+    `SELECT t.unique_id, t.tr_seq, t.date, t.total_no_tax, t.total_with_tax, t.total_tax,
             COALESCE(SUM(l.line_total), 0) AS line_sum,
             COUNT(l.id)::int AS line_count
      FROM transactions t
      JOIN transaction_lines l ON l.unique_id = t.unique_id
      WHERE t.date >= $1 AND t.date < $2
-     GROUP BY t.unique_id, t.tr_seq, t.date, t.total_with_tax
-     HAVING ABS(COALESCE(SUM(l.line_total), 0) - t.total_with_tax) > 1.00
-     ORDER BY ABS(COALESCE(SUM(l.line_total), 0) - t.total_with_tax) DESC
+     GROUP BY t.unique_id, t.tr_seq, t.date, t.total_no_tax, t.total_with_tax, t.total_tax
+     HAVING ABS(COALESCE(SUM(l.line_total), 0) - t.total_no_tax) > 1.00
+     ORDER BY ABS(COALESCE(SUM(l.line_total), 0) - t.total_no_tax) DESC
      LIMIT 20`,
     [start, end]
   );
@@ -85,11 +88,25 @@ export async function GET(req: NextRequest) {
     `;
   }
 
+  // 5. A synchronized aggregate snapshot, computed in this SAME call - so
+  // there's no risk of comparing this diagnostic against a dashboard
+  // reading taken at a different moment while new sales keep coming in.
+  const [aggregate] = await db`
+    SELECT
+      (SELECT COALESCE(SUM(total_with_tax), 0) FROM transactions WHERE date >= ${start} AND date < ${end}) AS total_revenue,
+      (SELECT COUNT(*) FROM transactions WHERE date >= ${start} AND date < ${end}) AS total_txn_count,
+      (SELECT COALESCE(SUM(l.line_total), 0) FROM transaction_lines l JOIN transactions t ON t.unique_id = l.unique_id
+        WHERE l.is_fuel = true AND t.date >= ${start} AND t.date < ${end}) AS fuel_revenue,
+      (SELECT COALESCE(SUM(l.line_total), 0) FROM transaction_lines l JOIN transactions t ON t.unique_id = l.unique_id
+        WHERE l.is_fuel = false AND t.date >= ${start} AND t.date < ${end}) AS merch_revenue_raw
+  `;
+
   return NextResponse.json({
     constraints_on_transactions_table: constraintCheck,
     duplicate_unique_id_rows_in_transactions: dupeTxnCheck,
     tie_out_mismatches_found: (tieOutIssues as any[]).length,
     tie_out_mismatches: tieOutIssues,
     worst_offender_actual_line_rows: worstOffenderLines,
+    synchronized_aggregate: aggregate,
   });
 }
