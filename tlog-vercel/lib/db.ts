@@ -355,33 +355,65 @@ export async function ingestTransactions(transactions: Transaction[]): Promise<n
 
 export async function getLiveFeed(limit = 50) {
   const db = sql();
+
+  // FIXED: this used to fire 2 separate queries PER ROW in a loop (lines,
+  // then payments) - for a 50-60 row feed, that's up to ~121 sequential
+  // round trips to the database for one page load, one after another, not
+  // even in parallel. Since @neondatabase/serverless's HTTP driver makes
+  // each query its own network request (no persistent connection to
+  // pipeline over), that latency compounds directly into how slow the
+  // dashboard feels on every single refresh cycle - almost certainly the
+  // dominant cause of the whole dashboard feeling sluggish. Fixed by
+  // fetching all lines and all payments for the whole page of transactions
+  // in exactly 2 batch queries (WHERE unique_id = ANY(...)), then grouping
+  // them back onto their parent transaction in memory - 3 queries total,
+  // regardless of how many transactions are in the page.
   const rows = await db`
     SELECT unique_id, trans_type, pos_num, tr_seq, date, cashier, total_with_tax
     FROM transactions ORDER BY date DESC LIMIT ${limit}
   `;
-  const out = [];
-  for (const r of rows) {
-    const lines = await db`
-      SELECT description, category, dept_number, qty, unit_price, is_fuel, fuel_grade, fuel_volume, pump_number, line_total
-      FROM transaction_lines WHERE unique_id = ${r.unique_id as string}
-    `;
-    const payments = await db`
-      SELECT tender_type, amount FROM transaction_payments WHERE unique_id = ${r.unique_id as string}
-    `;
-    out.push({
-      ...r,
-      total_with_tax: Number(r.total_with_tax),
-      lines: lines.map((l) => ({
-        ...l,
-        qty: l.qty === null ? null : Number(l.qty),
-        unit_price: l.unit_price === null ? null : Number(l.unit_price),
-        fuel_volume: l.fuel_volume === null ? null : Number(l.fuel_volume),
-        line_total: l.line_total === null ? null : Number(l.line_total),
-      })),
-      payments: payments.map((p) => ({ ...p, amount: Number(p.amount) })),
+  const ids = rows.map((r) => r.unique_id as string);
+
+  if (ids.length === 0) return [];
+
+  const [allLines, allPayments] = await Promise.all([
+    db.query(
+      `SELECT unique_id, description, category, dept_number, qty, unit_price, is_fuel, fuel_grade, fuel_volume, pump_number, line_total
+       FROM transaction_lines WHERE unique_id = ANY($1::text[])`,
+      [ids]
+    ),
+    db.query(
+      `SELECT unique_id, tender_type, amount FROM transaction_payments WHERE unique_id = ANY($1::text[])`,
+      [ids]
+    ),
+  ]);
+
+  const linesByTxn = new Map<string, any[]>();
+  for (const l of allLines as any[]) {
+    const arr = linesByTxn.get(l.unique_id) ?? [];
+    arr.push({
+      ...l,
+      qty: l.qty === null ? null : Number(l.qty),
+      unit_price: l.unit_price === null ? null : Number(l.unit_price),
+      fuel_volume: l.fuel_volume === null ? null : Number(l.fuel_volume),
+      line_total: l.line_total === null ? null : Number(l.line_total),
     });
+    linesByTxn.set(l.unique_id, arr);
   }
-  return out;
+
+  const paymentsByTxn = new Map<string, any[]>();
+  for (const p of allPayments as any[]) {
+    const arr = paymentsByTxn.get(p.unique_id) ?? [];
+    arr.push({ tender_type: p.tender_type, amount: Number(p.amount) });
+    paymentsByTxn.set(p.unique_id, arr);
+  }
+
+  return rows.map((r) => ({
+    ...r,
+    total_with_tax: Number(r.total_with_tax),
+    lines: linesByTxn.get(r.unique_id as string) ?? [],
+    payments: paymentsByTxn.get(r.unique_id as string) ?? [],
+  }));
 }
 
 export async function getKpis(start: string, end: string) {
