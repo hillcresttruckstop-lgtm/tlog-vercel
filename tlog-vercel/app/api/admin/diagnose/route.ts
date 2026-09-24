@@ -88,7 +88,23 @@ export async function GET(req: NextRequest) {
     `;
   }
 
-  // 5. A synchronized aggregate snapshot, computed in this SAME call - so
+  // 5. Suspicious $0.00 transactions - a real fuel/merch sale is never
+  // exactly $0. If these exist, they're most likely pump pre-authorization
+  // events (a card tap that starts the pump, logged as its own "sale"
+  // transaction before any fuel has actually been pumped) rather than
+  // real completed sales - if we're counting these as real transactions
+  // and a comparison tool isn't, that would inflate our transaction count
+  // without inflating revenue to match, exactly the pattern reported.
+  const zeroDollarTxns = await db`
+    SELECT unique_id, tr_seq, trans_type, date, cashier,
+           (SELECT COUNT(*)::int FROM transaction_lines WHERE unique_id = t.unique_id) AS line_count,
+           (SELECT bool_or(is_fuel) FROM transaction_lines WHERE unique_id = t.unique_id) AS has_fuel_line
+    FROM transactions t
+    WHERE total_with_tax = 0 AND date >= ${start} AND date < ${end}
+    ORDER BY date DESC
+  `;
+
+  // 6. A synchronized aggregate snapshot, computed in this SAME call - so
   // there's no risk of comparing this diagnostic against a dashboard
   // reading taken at a different moment while new sales keep coming in.
   const [aggregate] = await db`
@@ -107,6 +123,8 @@ export async function GET(req: NextRequest) {
     tie_out_mismatches_found: (tieOutIssues as any[]).length,
     tie_out_mismatches: tieOutIssues,
     worst_offender_actual_line_rows: worstOffenderLines,
+    zero_dollar_transactions_found: (zeroDollarTxns as any[]).length,
+    zero_dollar_transactions: zeroDollarTxns,
     synchronized_aggregate: aggregate,
   });
 }

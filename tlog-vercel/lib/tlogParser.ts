@@ -351,7 +351,22 @@ export function parseTlog(rawBytes: Buffer, sourceFile: string): ParseResult {
     if (transactionHasPreFuelLine(rawLineList)) continue; // fuel-prepay hold, see comment above
 
     const parsed = parseOneTrans(trans, sourceFile);
-    if (parsed) out.push(parsed);
+    if (!parsed) continue;
+
+    // Pump pre-authorization ping: VeriFone logs the moment a customer
+    // taps their card to START the pump as its own type="sale" record,
+    // before any fuel has actually been pumped - confirmed real: qty
+    // 0.000, volume 0.000, price $0.00, and critically NO payment record
+    // at all (no trPaylines element - nothing was actually charged). A
+    // real completed sale always has at least one payment; this doesn't,
+    // which is what distinguishes it from a genuine (rare but possible)
+    // $0.00 comped/promotional sale that WOULD still carry a real $0
+    // tender line. The real purchase arrives later as its own separate
+    // transaction with the actual amount once fueling finishes - that one
+    // is parsed and counted completely normally.
+    if (parsed.total_with_tax === 0 && parsed.payments.length === 0) continue;
+
+    out.push(parsed);
   }
   return { transactions: out, voidTickets };
 }
