@@ -279,6 +279,9 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<string | null>(null);
+  const [resetting, setResetting] = useState(false);
+  const [resetModalOpen, setResetModalOpen] = useState(false);
+  const [resetConfirmText, setResetConfirmText] = useState("");
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [paymentFilter, setPaymentFilter] = useState("all");
@@ -350,6 +353,51 @@ export default function Dashboard() {
     } finally {
       setSyncing(false);
       setTimeout(() => setSyncResult(null), 5000);
+    }
+  }
+
+  async function handleReset() {
+    setResetting(true);
+    setSyncResult("Resetting…");
+    try {
+      const resetRes = await fetch("/api/admin/reset-ui", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: "RESET" }),
+      });
+      const resetData = await resetRes.json();
+      if (!resetRes.ok || resetData.error) {
+        setSyncResult(`Reset failed: ${resetData.error || "unknown error"}`);
+        return;
+      }
+
+      // Reset itself is done (fast - just DELETE statements). The
+      // re-ingest is a SEPARATE follow-up request now, not bundled into
+      // the same one - ingest alone can take 30+ seconds right after a
+      // full wipe (the most work it will ever have to do), and stacking
+      // both into one request risked exceeding Vercel's 60s function
+      // limit, which silently killed the operation mid-ingest. Splitting
+      // them keeps each request comfortably inside its own budget.
+      setSyncResult("Reset done — syncing fresh data…");
+      const syncRes = await fetch("/api/sync", { method: "POST" });
+      const syncData = await syncRes.json();
+      if (!syncRes.ok || syncData.error) {
+        setSyncResult(`Reset succeeded, but the follow-up sync failed: ${syncData.error || "unknown error"} — try clicking Sync manually.`);
+      } else {
+        const newTxns = syncData.new_transactions ?? 0;
+        setSyncResult(
+          `Reset complete — ${newTxns} transaction${newTxns === 1 ? "" : "s"} synced so far` +
+            (syncData.remaining_backlog ? " (more historical data still catching up - click Sync again anytime)" : "")
+        );
+      }
+      await refresh();
+    } catch {
+      setSyncResult("Reset failed — connection error");
+    } finally {
+      setResetting(false);
+      setResetModalOpen(false);
+      setResetConfirmText("");
+      setTimeout(() => setSyncResult(null), 10000);
     }
   }
 
@@ -471,7 +519,7 @@ export default function Dashboard() {
           </span>
           <span className={`pulse-dot ${status?.total_transactions > 0 ? "live" : ""}`} />
           {syncResult && (
-            <span style={{ fontSize: 11, color: syncResult.startsWith("Sync failed") ? "var(--rose)" : "var(--up)" }}>
+            <span style={{ fontSize: 11, color: syncResult.includes("failed") ? "var(--rose)" : "var(--up)" }}>
               {syncResult}
             </span>
           )}
@@ -484,6 +532,13 @@ export default function Dashboard() {
             {syncing ? "Syncing…" : "↻ Sync"}
           </button>
           <button
+            onClick={() => setResetModalOpen(true)}
+            className="header-btn header-btn-danger"
+            title="Wipes all stored data and rebuilds it from scratch through the current parser - only needed after a parsing-logic update"
+          >
+            ⚠ Reset & Rebuild
+          </button>
+          <button
             onClick={async () => {
               await fetch("/api/logout", { method: "POST" });
               window.location.href = "/login";
@@ -494,6 +549,48 @@ export default function Dashboard() {
           </button>
         </div>
       </header>
+
+      {resetModalOpen && (
+        <div className="txn-modal-backdrop" onClick={() => !resetting && setResetModalOpen(false)}>
+          <div className="reset-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="reset-modal-title">⚠ Reset & Rebuild everything?</div>
+            <p className="reset-modal-body">
+              This permanently deletes <b>every</b> stored transaction, line item, payment, and void
+              ticket, then immediately re-pulls and re-parses everything from Google Drive through the
+              current parser. Today's live data reappears right away; historical months take longer to
+              fully catch back up. This only needs to be run after a parsing-logic update — not for
+              routine use (that's what the Sync button is for).
+            </p>
+            <p className="reset-modal-body">
+              Type <b>RESET</b> below to confirm:
+            </p>
+            <input
+              className="reset-modal-input"
+              value={resetConfirmText}
+              onChange={(e) => setResetConfirmText(e.target.value)}
+              placeholder="Type RESET"
+              disabled={resetting}
+              autoFocus
+            />
+            <div className="reset-modal-actions">
+              <button
+                className="header-btn"
+                onClick={() => setResetModalOpen(false)}
+                disabled={resetting}
+              >
+                Cancel
+              </button>
+              <button
+                className="header-btn-danger-solid"
+                onClick={handleReset}
+                disabled={resetConfirmText !== "RESET" || resetting}
+              >
+                {resetting ? "Resetting & rebuilding…" : "Permanently reset & rebuild"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <nav className="range-tabs">
         {RANGES.map((r) => (
