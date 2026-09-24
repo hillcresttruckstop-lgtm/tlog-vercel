@@ -13,7 +13,7 @@ import { parseTlog } from "./tlogParser";
 import {
   initSchema,
   fileHash,
-  getKnownModifiedTime,
+  getKnownModifiedTimes,
   ingestTransactions,
   ingestVoidTickets,
   markFileProcessed,
@@ -86,11 +86,12 @@ export async function runIngest(): Promise<IngestRunResult> {
 
   // Cheap pass: for every file, compare Drive's modifiedTime against what
   // we last recorded - no downloading required for this check at all.
+  // One batch query for every file's known mtime, not one query per file.
+  const knownMtimes = await getKnownModifiedTimes(files.map((f) => f.name));
   const candidates: DriveFileRef[] = [];
   let skippedCount = 0;
   for (const file of files) {
-    const knownMtime = await getKnownModifiedTime(file.name);
-    if (knownMtime === file.modifiedTime) {
+    if (knownMtimes.get(file.name) === file.modifiedTime) {
       skippedCount++;
       continue;
     }

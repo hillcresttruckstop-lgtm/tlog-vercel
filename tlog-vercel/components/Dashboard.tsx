@@ -194,31 +194,41 @@ function VoidsPanel({
                 </tr>
               </thead>
               <tbody>
-                {data.tickets.map((t) => (
-                  <tr
-                    key={t.unique_id}
-                    onClick={() =>
-                      onSelectTxn({
-                        unique_id: t.unique_id,
-                        trans_type: "void",
-                        pos_num: t.pos_num,
-                        tr_seq: t.tr_seq,
-                        date: t.date,
-                        cashier: t.cashier,
-                        total_with_tax: t.total_with_tax,
-                        lines: t.lines ?? [],
-                        payments: [],
-                      })
-                    }
-                    style={{ cursor: "pointer" }}
-                  >
-                    <td>{new Date(t.date).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</td>
-                    <td>{t.pos_num != null ? `Reg ${t.pos_num}` : "—"}</td>
-                    <td>{t.cashier ?? "—"}</td>
-                    <td>{(t.lines ?? []).length}</td>
-                    <td>{fmtMoney(t.total_with_tax)}</td>
-                  </tr>
-                ))}
+                {data.tickets.map((t) => {
+                  const openTicket = () =>
+                    onSelectTxn({
+                      unique_id: t.unique_id,
+                      trans_type: "void",
+                      pos_num: t.pos_num,
+                      tr_seq: t.tr_seq,
+                      date: t.date,
+                      cashier: t.cashier,
+                      total_with_tax: t.total_with_tax,
+                      lines: t.lines ?? [],
+                      payments: [],
+                    });
+                  return (
+                    <tr
+                      key={t.unique_id}
+                      onClick={openTicket}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          openTicket();
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      style={{ cursor: "pointer" }}
+                    >
+                      <td>{new Date(t.date).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</td>
+                      <td>{t.pos_num != null ? `Reg ${t.pos_num}` : "—"}</td>
+                      <td>{t.cashier ?? "—"}</td>
+                      <td>{(t.lines ?? []).length}</td>
+                      <td>{fmtMoney(t.total_with_tax)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -286,8 +296,17 @@ export default function Dashboard() {
   const [merchCategoryFilter, setMerchCategoryFilter] = useState("all");
   const knownIds = useRef<Set<string>>(new Set());
   const firstLoad = useRef(true);
+  // FIXED: switching ranges quickly (e.g. Today -> 7 Days) fires a new
+  // fetch for each, but nothing stopped an OLDER, slower request from
+  // resolving AFTER a newer one and overwriting its results - the
+  // dashboard could briefly show data for a range you'd already clicked
+  // away from, and it wouldn't self-correct until the next poll cycle.
+  // This counter tags every refresh() call; a response is only applied if
+  // it's still the most recently issued one by the time it comes back.
+  const latestRequestId = useRef(0);
 
   const refresh = useCallback(async () => {
+    const requestId = ++latestRequestId.current;
     try {
       const rangeQuery =
         range === "custom" ? `range=custom&start=${customStart}&end=${customEnd}` : `range=${range}`;
@@ -297,6 +316,7 @@ export default function Dashboard() {
         fetch(`/api/live-feed?limit=60`).then((r) => r.json()),
         fetch(`/api/status`).then((r) => r.json()),
       ]);
+      if (requestId !== latestRequestId.current) return; // a newer request already landed - discard this one
       setSummary(summaryRes);
       setInsights(insightsRes);
       setFeed(feedRes);
@@ -304,6 +324,7 @@ export default function Dashboard() {
       setError(null);
       setSecondsLeft(REFRESH_MS / 1000);
     } catch {
+      if (requestId !== latestRequestId.current) return;
       setError("connection error — retrying…");
     }
   }, [range, customStart, customEnd]);
@@ -539,6 +560,15 @@ export default function Dashboard() {
             className="kpi kpi-clickable"
             style={{ ["--accent" as any]: "var(--rose)" }}
             onClick={() => setVoidsOpen((v) => !v)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setVoidsOpen((v) => !v);
+              }
+            }}
+            role="button"
+            tabIndex={0}
+            aria-expanded={voidsOpen}
           >
             <div className="kpi-label">Voids {voidsOpen ? "▲" : "▾"}</div>
             <div className="kpi-value mono">{kpis ? fmtNum(kpis.void_count ?? 0) : "—"}</div>
@@ -715,6 +745,14 @@ export default function Dashboard() {
                     key={item.unique_id}
                     className={`feed-row ${isNew ? "new" : ""}`}
                     onClick={() => setSelectedTxn(item)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setSelectedTxn(item);
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
                   >
                     <div className="feed-row-main">
                       <div className="feed-left">

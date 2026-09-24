@@ -64,6 +64,20 @@ export async function initSchema() {
   await db`CREATE INDEX IF NOT EXISTS idx_lines_unique_id ON transaction_lines(unique_id)`;
   await db`CREATE INDEX IF NOT EXISTS idx_lines_is_fuel ON transaction_lines(is_fuel)`;
   await db`CREATE INDEX IF NOT EXISTS idx_lines_category ON transaction_lines(category)`;
+  // Matches the single most common query shape in this file: join
+  // transaction_lines to transactions via unique_id, then filter by
+  // is_fuel - used by getKpis, getFuelByGrade, getMerchByCategory,
+  // getMerchByDepartment, getPumpActivity, getDailyLedger, and
+  // getPumpHealthFlags. The plain single-column is_fuel index above is
+  // low-selectivity on its own (only two possible values, so Postgres
+  // often skips it in favor of a sequential scan) - this composite index
+  // is what actually helps the join+filter combination those queries share.
+  await db`CREATE INDEX IF NOT EXISTS idx_lines_uniqueid_isfuel ON transaction_lines(unique_id, is_fuel)`;
+  // Void lines are a tiny fraction of all rows (a cashier voiding one item
+  // mid-sale is rare) - a PARTIAL index (only indexing the true rows) is
+  // far smaller and faster to maintain than a full index would be, for
+  // exactly the query the Void Lines panel runs.
+  await db`CREATE INDEX IF NOT EXISTS idx_lines_void_line ON transaction_lines(is_void_line) WHERE is_void_line = true`;
 
   await db`
     CREATE TABLE IF NOT EXISTS transaction_payments (
@@ -75,6 +89,10 @@ export async function initSchema() {
     )
   `;
   await db`CREATE INDEX IF NOT EXISTS idx_payments_unique_id ON transaction_payments(unique_id)`;
+  // Repeat Customers groups by card_last4 over potentially a full year of
+  // payments - without this, that query has to scan every payment row
+  // rather than seeking directly to matching cards as the table grows.
+  await db`CREATE INDEX IF NOT EXISTS idx_payments_card_last4 ON transaction_payments(card_last4) WHERE card_last4 IS NOT NULL`;
 
   await db`
     CREATE TABLE IF NOT EXISTS processed_files (
@@ -125,6 +143,26 @@ export async function getKnownModifiedTime(filename: string): Promise<string | n
   const db = sql();
   const rows = await db`SELECT modified_time FROM processed_files WHERE filename = ${filename}`;
   return rows.length > 0 ? (rows[0].modified_time as string | null) : null;
+}
+
+/** Same lookup as getKnownModifiedTime, but for every file in one query
+ * instead of one query per file. FIXED: the ingest run used to call
+ * getKnownModifiedTime in a loop, once per file in the Drive folder - for
+ * 343+ files (and growing every day), that's 343+ sequential database
+ * queries on EVERY single ingest cycle, every 15 minutes, before any
+ * actual work even starts. That directly eats into the 30-second
+ * cron-job.org budget this same ingest run has to fit inside. Returns a
+ * Map so the caller can do the comparison in memory. */
+export async function getKnownModifiedTimes(filenames: string[]): Promise<Map<string, string | null>> {
+  const map = new Map<string, string | null>();
+  if (filenames.length === 0) return map;
+  const db = sql();
+  const rows = await db.query(
+    `SELECT filename, modified_time FROM processed_files WHERE filename = ANY($1::text[])`,
+    [filenames]
+  );
+  for (const r of rows as any[]) map.set(r.filename, r.modified_time);
+  return map;
 }
 
 export async function isFileUnchanged(filename: string, hash: string): Promise<boolean> {
@@ -431,13 +469,26 @@ export async function getKpis(start: string, end: string) {
   `;
   const fuelGallons = Number(fuelRow.fuel_gallons);
   const fuelRevenue = Number(fuelRow.fuel_revenue);
+  const taxCollected = Number(row.tax_collected);
+  // FIXED: this was "revenue - fuel_revenue" with no tax subtracted -
+  // since `revenue` is total_with_tax (correctly includes tax, matching
+  // "Total Business" in the daily report) but fuel_revenue does NOT
+  // include tax (fuel lines' trlLineTot is pre-tax, tax is tracked only
+  // at the whole-transaction level), the old formula was actually
+  // computing merch+tax combined, not merch alone. Confirmed directly
+  // against a real daily report: Total Business - Fuel = $3,021.71, but
+  // the report's own authoritative Merch Sales is $2,879.14 - the
+  // $142.57 gap is exactly that day's Tax Collected. The report's own
+  // formula is explicitly "Total Business - Fuel - Tax", not just
+  // "- Fuel" - matching that exactly here.
+  const merchRevenue = Number(row.revenue) - fuelRevenue - taxCollected;
   return {
     txn_count: row.txn_count as number,
     revenue: Number(row.revenue),
-    tax_collected: Number(row.tax_collected),
+    tax_collected: taxCollected,
     fuel_revenue: fuelRevenue,
     fuel_gallons: fuelGallons,
-    merch_revenue: Number(row.revenue) - fuelRevenue,
+    merch_revenue: merchRevenue,
     avg_price_per_gallon: fuelGallons > 0 ? fuelRevenue / fuelGallons : null,
   };
 }
@@ -576,13 +627,9 @@ export async function getStatus() {
   const db = sql();
   const [totalRow] = await db`SELECT COUNT(*)::int AS c FROM transactions`;
   const [lastRow] = await db`SELECT MAX(date) AS d FROM transactions`;
-  const files = await db`
-    SELECT filename, processed_at, txn_count FROM processed_files ORDER BY processed_at DESC
-  `;
   return {
     total_transactions: totalRow.c as number,
     last_transaction_date: lastRow.d,
-    files_processed: files,
   };
 }
 
@@ -709,9 +756,16 @@ export async function getRepeatCustomers(start: string, end: string, minVisits =
  * diagnosis (could just be legitimately quiet, but worth a glance). */
 export async function getPumpHealthFlags(start: string, end: string) {
   const db = sql();
+  // "Which pumps exist at all" barely ever changes, so there's no reason
+  // to scan the ENTIRE table's history (which only ever grows) to answer
+  // it - bounded to the last 90 days, which is more than enough to catch
+  // any pump that's genuinely in use, while keeping this query's cost
+  // flat over time instead of slowly worsening every month.
+  const recentWindowStart = new Date(new Date(end).getTime() - 90 * 24 * 3600 * 1000).toISOString();
   const allPumps = await db`
-    SELECT DISTINCT pump_number FROM transaction_lines
-    WHERE is_fuel = true AND pump_number IS NOT NULL
+    SELECT DISTINCT pump_number FROM transaction_lines l
+    JOIN transactions t ON t.unique_id = l.unique_id
+    WHERE l.is_fuel = true AND l.pump_number IS NOT NULL AND t.date >= ${recentWindowStart}
   `;
   const activePumps = await db.query(
     `SELECT DISTINCT l.pump_number

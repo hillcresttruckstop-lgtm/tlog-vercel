@@ -540,3 +540,11 @@ main { padding: 20px 28px 40px; display: flex; flex-direction: column; gap: 18px
 /* ── Lottery card accents ────────────────────────────────── */
 .lottery-color { color: #b48ce0; }
 .lottery-negative { color: var(--rose); }
+
+/* ── Keyboard focus visibility for clickable rows/tiles ─────── */
+.feed-row:focus-visible,
+.kpi-clickable:focus-visible,
+.sortable-table tbody tr[role="button"]:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: -2px;
+}
