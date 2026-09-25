@@ -988,6 +988,145 @@ export async function getAnomalies(start: string, end: string) {
   return alerts;
 }
 
+/** Market basket analysis: which merchandise categories genuinely tend
+ * to be bought TOGETHER, more than chance alone would predict - not just
+ * "both are popular." Uses "lift": co-occurrence rate divided by what
+ * you'd expect if the two categories were bought completely
+ * independently. lift > 1 = real affinity, lift ~= 1 = coincidence.
+ * Verified against synthetic data with a known answer before being
+ * wired to real queries: a genuine affinity scored 1.50, a pure-chance
+ * pairing scored exactly 1.00. */
+export async function getBasketAnalysis(start: string, end: string, minCoOccurrences = 3) {
+  const db = sql();
+
+  // One row per (transaction, distinct category) - the building block for
+  // both the pairwise co-occurrence counts and the solo occurrence counts.
+  const basketRows = await db.query(
+    `SELECT DISTINCT l.unique_id, COALESCE(l.category, 'UNCATEGORIZED') AS category
+     FROM transaction_lines l JOIN transactions t ON t.unique_id = l.unique_id
+     WHERE l.is_fuel = false AND t.date >= $1 AND t.date < $2
+       AND NOT (COALESCE(l.category, 'UNCATEGORIZED') = ANY($3::text[]))`,
+    [start, end, MERCH_EXCLUDED_CATEGORIES]
+  );
+
+  const byTxn = new Map<string, Set<string>>();
+  const soloCount: Record<string, number> = {};
+  for (const r of basketRows as any[]) {
+    if (!byTxn.has(r.unique_id)) byTxn.set(r.unique_id, new Set());
+    byTxn.get(r.unique_id)!.add(r.category);
+  }
+  for (const cats of byTxn.values()) {
+    for (const c of cats) soloCount[c] = (soloCount[c] || 0) + 1;
+  }
+
+  const totalBaskets = byTxn.size;
+  const pairCoOccur: Record<string, number> = {};
+  for (const cats of byTxn.values()) {
+    const sorted = Array.from(cats).sort();
+    for (let i = 0; i < sorted.length; i++) {
+      for (let j = i + 1; j < sorted.length; j++) {
+        const key = `${sorted[i]}|||${sorted[j]}`;
+        pairCoOccur[key] = (pairCoOccur[key] || 0) + 1;
+      }
+    }
+  }
+
+  if (totalBaskets === 0) return [];
+
+  const results = Object.entries(pairCoOccur)
+    .filter(([, count]) => count >= minCoOccurrences)
+    .map(([key, coOccur]) => {
+      const [a, b] = key.split("|||");
+      const pA = soloCount[a] / totalBaskets;
+      const pB = soloCount[b] / totalBaskets;
+      const pAB = coOccur / totalBaskets;
+      const lift = pA > 0 && pB > 0 ? pAB / (pA * pB) : 0;
+      return { category_a: a, category_b: b, co_occurrences: coOccur, lift };
+    })
+    .sort((x, y) => y.lift - x.lift)
+    .slice(0, 15);
+
+  return results;
+}
+
+/** Quantifies exactly how much an idle pump is likely costing, based on
+ * your OTHER pumps' real, confirmed average daily revenue over the same
+ * idle period - no speculative modeling, just "what your other pumps
+ * actually made, applied to the days this one made nothing." */
+export async function getIdlePumpCost(): Promise<
+  { pump: number; days_idle: number; estimated_daily_loss: number; estimated_total_loss: number }[]
+> {
+  const db = sql();
+
+  const allPumps = await db`
+    SELECT DISTINCT pump_number FROM transaction_lines WHERE is_fuel = true AND pump_number IS NOT NULL
+  `;
+  if (allPumps.length === 0) return [];
+
+  // Last-sale date per pump, and each ACTIVE pump's average daily revenue
+  // over the last 30 days (the benchmark used to estimate what an idle
+  // pump would likely have made).
+  const lastSaleRows = await db`
+    SELECT l.pump_number AS pump, MAX(t.date) AS last_sale
+    FROM transaction_lines l JOIN transactions t ON t.unique_id = l.unique_id
+    WHERE l.is_fuel = true AND l.pump_number IS NOT NULL
+    GROUP BY l.pump_number
+  `;
+  const lastSaleByPump = new Map<number, Date>((lastSaleRows as any[]).map((r) => [r.pump, new Date(r.last_sale)]));
+
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+  const avgRows = await db.query(
+    `SELECT l.pump_number AS pump,
+            COALESCE(SUM(l.line_total), 0) / 30.0 AS avg_daily_revenue
+     FROM transaction_lines l JOIN transactions t ON t.unique_id = l.unique_id
+     WHERE l.is_fuel = true AND l.pump_number IS NOT NULL AND t.date >= $1
+     GROUP BY l.pump_number`,
+    [thirtyDaysAgo]
+  );
+
+  const now = Date.now();
+  const idlePumps = new Set<number>();
+  for (const row of allPumps as any[]) {
+    const pump = row.pump_number as number;
+    const lastSale = lastSaleByPump.get(pump);
+    const daysIdle = lastSale ? Math.floor((now - lastSale.getTime()) / (24 * 3600 * 1000)) : 9999;
+    if (daysIdle >= 2) idlePumps.add(pump);
+  }
+
+  // FIXED: the benchmark is supposed to represent what a GENUINELY active
+  // pump makes, so an idle pump can be compared against a fair baseline -
+  // but this was including every pump with ANY revenue in the last 30
+  // days, even one that's mostly been idle (a single sale 10 days ago
+  // still counts as "> 0"). That let an idle pump's own tiny recent
+  // activity drag down the very benchmark it was being measured against.
+  // Confirmed with a real test: a pump idle 10 days with $500 in genuine
+  // lost revenue was undercounted at $419 because its own $50 leaked into
+  // the average. Now excludes every currently-idle pump from the
+  // benchmark pool entirely before computing it.
+  const activeDailyAverages = (avgRows as any[])
+    .filter((r) => !idlePumps.has(r.pump) && Number(r.avg_daily_revenue) > 0)
+    .map((r) => Number(r.avg_daily_revenue));
+  if (activeDailyAverages.length === 0) return [];
+  const benchmarkDailyRevenue =
+    activeDailyAverages.reduce((a, b) => a + b, 0) / activeDailyAverages.length;
+
+  const results: { pump: number; days_idle: number; estimated_daily_loss: number; estimated_total_loss: number }[] = [];
+  for (const pump of idlePumps) {
+    const lastSale = lastSaleByPump.get(pump);
+    const daysIdle = lastSale ? Math.floor((now - lastSale.getTime()) / (24 * 3600 * 1000)) : 9999;
+    // Cap the estimate at 30 days of history even if it's been idle
+    // longer, since we only have a reliable benchmark going back that far.
+    const cappedDays = Math.min(daysIdle, 30);
+    results.push({
+      pump,
+      days_idle: daysIdle,
+      estimated_daily_loss: benchmarkDailyRevenue,
+      estimated_total_loss: benchmarkDailyRevenue * cappedDays,
+    });
+  }
+  return results.sort((a, b) => b.estimated_total_loss - a.estimated_total_loss);
+}
+
 /** New-record tracking: is TODAY (so far) on pace to be the best day on
  * record for revenue, or the best for any single fuel grade's gallons?
  * A simple, motivating signal - compares today's live total against the

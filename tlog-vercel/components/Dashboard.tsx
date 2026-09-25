@@ -306,6 +306,8 @@ export default function Dashboard() {
   const [paymentFilter, setPaymentFilter] = useState("all");
   const [selectedTxn, setSelectedTxn] = useState<FeedItem | null>(null);
   const [voidsOpen, setVoidsOpen] = useState(false);
+  const [topMerchOpen, setTopMerchOpen] = useState(true);
+  const [repeatCustomersOpen, setRepeatCustomersOpen] = useState(true);
   const [secondsLeft, setSecondsLeft] = useState(REFRESH_MS / 1000);
   const [ledgerSort, setLedgerSort] = useState<{ col: string; dir: "asc" | "desc" }>({
     col: "day",
@@ -826,12 +828,29 @@ export default function Dashboard() {
           </div>
         )}
 
-        {insights?.pump_flags?.length > 0 && (
-          <div className="pump-warning">
-            ⚠ No fuel sales this range from: {insights.pump_flags.map((p: number) => `Pump ${p}`).join(", ")} —
-            worth a quick check if that's unexpected.
+        {insights?.idle_pump_cost?.length > 0 && (
+          <div className="pump-warning pump-warning-cost">
+            {insights.idle_pump_cost.map((p: any) => (
+              <div key={p.pump}>
+                ⚠ <b>Pump {p.pump}</b> has been idle for <b>{p.days_idle} day{p.days_idle === 1 ? "" : "s"}</b> — based on
+                your other pumps' average, that's an estimated{" "}
+                <b style={{ color: "var(--rose)" }}>{fmtMoney(p.estimated_total_loss)}</b> in lost revenue
+                (~{fmtMoney(p.estimated_daily_loss)}/day).
+              </div>
+            ))}
           </div>
         )}
+        {insights?.pump_flags?.length > 0 &&
+          insights.pump_flags.filter((p: number) => !insights.idle_pump_cost?.some((ip: any) => ip.pump === p)).length > 0 && (
+            <div className="pump-warning">
+              ⚠ No fuel sales this range from:{" "}
+              {insights.pump_flags
+                .filter((p: number) => !insights.idle_pump_cost?.some((ip: any) => ip.pump === p))
+                .map((p: number) => `Pump ${p}`)
+                .join(", ")}{" "}
+              — worth a quick check if that's unexpected.
+            </div>
+          )}
 
         <section className="main-grid">
           <div className="panel">
@@ -1101,27 +1120,36 @@ export default function Dashboard() {
         </section>
 
         <section className="panel">
-          <div className="panel-head">
-            <h2>Top merchandise</h2>
-            <div className="panel-head-actions">
-              <select
-                className="feed-filter-select"
-                value={merchCategoryFilter}
-                onChange={(e) => setMerchCategoryFilter(e.target.value)}
-                style={{ flex: "none", width: "auto" }}
-              >
-                <option value="all">All categories</option>
-                {merchCategories.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-              <button className="export-btn" onClick={() => downloadCSV(`top-merchandise-${range}.csv`, sortedMerch)}>
-                Export CSV
-              </button>
-            </div>
+          <div
+            className="panel-head panel-head-collapsible"
+            onClick={() => setTopMerchOpen((v) => !v)}
+            role="button"
+            tabIndex={0}
+            aria-expanded={topMerchOpen}
+          >
+            <h2>Top merchandise {topMerchOpen ? "▲" : "▾"}</h2>
+            {topMerchOpen && (
+              <div className="panel-head-actions" onClick={(e) => e.stopPropagation()}>
+                <select
+                  className="feed-filter-select"
+                  value={merchCategoryFilter}
+                  onChange={(e) => setMerchCategoryFilter(e.target.value)}
+                  style={{ flex: "none", width: "auto" }}
+                >
+                  <option value="all">All categories</option>
+                  {merchCategories.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+                <button className="export-btn" onClick={() => downloadCSV(`top-merchandise-${range}.csv`, sortedMerch)}>
+                  Export CSV
+                </button>
+              </div>
+            )}
           </div>
+          {topMerchOpen && (
           <div className="table-scroll">
           <table className="sortable-table">
             <thead>
@@ -1160,6 +1188,7 @@ export default function Dashboard() {
             </tbody>
           </table>
           </div>
+          )}
         </section>
 
         <section className="two-col-grid">
@@ -1260,11 +1289,40 @@ export default function Dashboard() {
           </div>
         </section>
 
+        {insights?.basket_analysis?.length > 0 && (
+          <section className="panel">
+            <div className="panel-head">
+              <h2>What sells together</h2>
+              <span className="panel-sub">category pairs bought together more than chance alone predicts</span>
+            </div>
+            <div className="basket-grid">
+              {insights.basket_analysis.map((b: any, i: number) => (
+                <div className="basket-card" key={i}>
+                  <div className="basket-pair">
+                    {b.category_a} <span className="basket-plus">+</span> {b.category_b}
+                  </div>
+                  <div className="basket-lift">
+                    {b.lift.toFixed(1)}× <span className="basket-lift-label">more likely together</span>
+                  </div>
+                  <div className="basket-count">{fmtNum(b.co_occurrences)} baskets</div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
         <section className="panel">
-          <div className="panel-head">
-            <h2>Repeat customers</h2>
-            <span className="panel-sub">cards seen 2+ times in this range, by last 4 digits</span>
+          <div
+            className="panel-head panel-head-collapsible"
+            onClick={() => setRepeatCustomersOpen((v) => !v)}
+            role="button"
+            tabIndex={0}
+            aria-expanded={repeatCustomersOpen}
+          >
+            <h2>Repeat customers {repeatCustomersOpen ? "▲" : "▾"}</h2>
+            {repeatCustomersOpen && <span className="panel-sub">cards seen 2+ times in this range, by last 4 digits</span>}
           </div>
+          {repeatCustomersOpen && (
           <div className="table-scroll">
           <table className="sortable-table">
             <thead>
@@ -1295,6 +1353,7 @@ export default function Dashboard() {
             </tbody>
           </table>
           </div>
+          )}
         </section>
       </main>
 

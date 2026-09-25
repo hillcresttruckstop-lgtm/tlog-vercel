@@ -624,3 +624,29 @@ main { padding: 20px 28px 40px; display: flex; flex-direction: column; gap: 18px
 .smart-insight-icon { font-size: 17px; line-height: 1.4; flex-shrink: 0; width: 22px; text-align: center; }
 .smart-insight-title { font-size: 13.5px; font-weight: 600; color: var(--text); margin-bottom: 2px; }
 .smart-insight-detail { font-size: 12px; color: var(--text-dim); line-height: 1.5; }
+
+/* ── Basket analysis ──────────────────────────────────────── */
+
+.basket-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+.basket-card {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+.basket-pair { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+.basket-plus { color: var(--text-faint); font-weight: 400; }
+.basket-lift { font-size: 18px; font-weight: 700; color: var(--up); }
+.basket-lift-label { font-size: 10.5px; font-weight: 400; color: var(--text-faint); text-transform: none; }
+.basket-count { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+
+/* ── Idle pump cost warning ──────────────────────────────── */
+.pump-warning-cost { display: flex; flex-direction: column; gap: 6px; }
+
+/* ── Collapsible panel headers ────────────────────────────── */
+.panel-head-collapsible { cursor: pointer; user-select: none; }
+.panel-head-collapsible:hover h2 { color: var(--amber); }

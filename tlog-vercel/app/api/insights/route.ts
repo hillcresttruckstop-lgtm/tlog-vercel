@@ -8,6 +8,8 @@ import {
   getDailyLedger,
   getRepeatCustomers,
   getPumpHealthFlags,
+  getBasketAnalysis,
+  getIdlePumpCost,
 } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
@@ -25,7 +27,7 @@ export async function GET(req: NextRequest) {
     req.nextUrl.searchParams.get("end")
   );
 
-  const [kpis, prevKpis, hourOfDay, dayOfWeek, dailyLedger, repeatCustomers, pumpFlags] =
+  const [kpis, prevKpis, hourOfDay, dayOfWeek, dailyLedger, repeatCustomers, pumpFlags, basketAnalysis, idlePumpCost] =
     await Promise.all([
       getKpis(start, end),
       getPreviousPeriodKpis(start, end),
@@ -34,6 +36,8 @@ export async function GET(req: NextRequest) {
       getDailyLedger(start, end),
       getRepeatCustomers(start, end),
       getPumpHealthFlags(start, end),
+      getBasketAnalysis(start, end),
+      getIdlePumpCost(), // not range-scoped - always reflects current idle status regardless of the selected range
     ]);
 
   const comparison = {
@@ -54,6 +58,8 @@ export async function GET(req: NextRequest) {
     daily_ledger: dailyLedger,
     repeat_customers: repeatCustomers,
     pump_flags: pumpFlags,
+    basket_analysis: basketAnalysis,
+    idle_pump_cost: idlePumpCost,
     highlights: {
       busiest_hour: busiestHour,
       busiest_day: busiestDay,
