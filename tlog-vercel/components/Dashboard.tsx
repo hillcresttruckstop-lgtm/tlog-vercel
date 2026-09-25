@@ -155,6 +155,7 @@ function VoidsPanel({
 }) {
   const [data, setData] = useState<{ tickets: any[]; lines: any[] } | null>(null);
   const [tab, setTab] = useState<"tickets" | "lines">("tickets");
+  const [loadingParent, setLoadingParent] = useState<string | null>(null);
 
   useEffect(() => {
     const rangeQuery = range === "custom" ? `range=custom&start=${customStart}&end=${customEnd}` : `range=${range}`;
@@ -163,6 +164,18 @@ function VoidsPanel({
       .then(setData)
       .catch(() => setData({ tickets: [], lines: [] }));
   }, [range, customStart, customEnd]);
+
+  async function openVoidLineParent(uniqueId: string) {
+    setLoadingParent(uniqueId);
+    try {
+      const res = await fetch(`/api/transaction?id=${encodeURIComponent(uniqueId)}`);
+      const txn = await res.json();
+      if (res.ok) onSelectTxn(txn);
+    } finally {
+      setLoadingParent(null);
+    }
+  }
+
 
   return (
     <section className="panel voids-panel">
@@ -249,9 +262,14 @@ function VoidsPanel({
             </thead>
             <tbody>
               {data.lines.map((l, i) => (
-                <tr key={i}>
+                <tr
+                  key={i}
+                  onClick={() => openVoidLineParent(l.unique_id)}
+                  style={{ cursor: "pointer", opacity: loadingParent === l.unique_id ? 0.5 : 1 }}
+                  title="View the full transaction this voided item was part of"
+                >
                   <td>{new Date(l.date).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</td>
-                  <td>{l.description ?? "—"}</td>
+                  <td>{l.description ?? "—"}{loadingParent === l.unique_id ? " (loading…)" : ""}</td>
                   <td>{l.category ?? "—"}</td>
                   <td>{l.tr_seq ?? "—"}</td>
                   <td>{fmtMoney(l.line_total ?? 0)}</td>
@@ -276,6 +294,7 @@ export default function Dashboard() {
   const [insights, setInsights] = useState<any>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [status, setStatus] = useState<any>(null);
+  const [smartInsights, setSmartInsights] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<string | null>(null);
@@ -313,17 +332,19 @@ export default function Dashboard() {
     try {
       const rangeQuery =
         range === "custom" ? `range=custom&start=${customStart}&end=${customEnd}` : `range=${range}`;
-      const [summaryRes, insightsRes, feedRes, statusRes] = await Promise.all([
+      const [summaryRes, insightsRes, feedRes, statusRes, smartRes] = await Promise.all([
         fetch(`/api/summary?${rangeQuery}`).then((r) => r.json()),
         fetch(`/api/insights?${rangeQuery}`).then((r) => r.json()),
         fetch(`/api/live-feed?limit=60`).then((r) => r.json()),
         fetch(`/api/status`).then((r) => r.json()),
+        fetch(`/api/smart-insights`).then((r) => r.json()),
       ]);
       if (requestId !== latestRequestId.current) return; // a newer request already landed - discard this one
       setSummary(summaryRes);
       setInsights(insightsRes);
       setFeed(feedRes);
       setStatus(statusRes);
+      setSmartInsights(smartRes);
       setError(null);
       setSecondsLeft(REFRESH_MS / 1000);
     } catch {
@@ -673,6 +694,68 @@ export default function Dashboard() {
         </section>
 
         {voidsOpen && <VoidsPanel range={range} customStart={customStart} customEnd={customEnd} onSelectTxn={setSelectedTxn} />}
+
+        {range === "today" && smartInsights && (smartInsights.forecast || smartInsights.record || smartInsights.anomalies?.length > 0) && (
+          <section className="panel smart-insights-panel">
+            <div className="panel-head">
+              <h2>Smart insights</h2>
+              <span className="panel-sub">forecast, records &amp; anomalies for today</span>
+            </div>
+
+            {smartInsights.forecast && (
+              <div className="smart-insight-row">
+                <div className="smart-insight-icon">📈</div>
+                <div>
+                  <div className="smart-insight-title">
+                    Projected to finish around {fmtMoney(smartInsights.forecast.projected_total)} today
+                  </div>
+                  <div className="smart-insight-detail">
+                    Based on how the last {smartInsights.forecast.historical_days_used} {new Date().toLocaleDateString([], { weekday: "long" })}s
+                    unfolded by this time of day
+                    {smartInsights.forecast.pct_vs_historical_average != null && (
+                      <>
+                        {" — "}
+                        {smartInsights.forecast.pct_vs_historical_average >= 0 ? "trending " : "trending "}
+                        <b style={{ color: smartInsights.forecast.pct_vs_historical_average >= 0 ? "var(--up)" : "var(--rose)" }}>
+                          {smartInsights.forecast.pct_vs_historical_average >= 0 ? "+" : ""}
+                          {smartInsights.forecast.pct_vs_historical_average.toFixed(0)}%
+                        </b>{" "}
+                        vs a typical day like this
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {smartInsights.record?.is_new_record && (
+              <div className="smart-insight-row">
+                <div className="smart-insight-icon">🏆</div>
+                <div>
+                  <div className="smart-insight-title" style={{ color: "var(--up)" }}>
+                    New revenue record — best day yet!
+                  </div>
+                  <div className="smart-insight-detail">
+                    {fmtMoney(smartInsights.record.today_total)} so far, beating the previous best of{" "}
+                    {fmtMoney(smartInsights.record.best_day_total)} on{" "}
+                    {new Date(smartInsights.record.best_day + "T12:00:00").toLocaleDateString([], { month: "short", day: "numeric" })}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {smartInsights.anomalies?.map((a: any, i: number) => (
+              <div className="smart-insight-row" key={i}>
+                <div className="smart-insight-icon">{a.severity === "warning" ? "⚠" : "ℹ"}</div>
+                <div>
+                  <div className="smart-insight-detail" style={{ color: a.severity === "warning" ? "var(--amber)" : "var(--text-dim)" }}>
+                    {a.message}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </section>
+        )}
 
         {kpis && kpis.revenue > 0 && (
           <section className="panel sales-mix">
