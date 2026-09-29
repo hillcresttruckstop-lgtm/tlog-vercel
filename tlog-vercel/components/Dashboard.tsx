@@ -680,6 +680,13 @@ export default function Dashboard() {
       </nav>
 
       <main>
+        {range === "today" && insights && !insights.today_closed && (
+          <div className="live-day-banner">
+            ⏳ <b>Today's numbers are live, not final.</b> The register only writes its closing file once the day's
+            period actually ends - until then these totals can still move, and are the best data available right now.
+          </div>
+        )}
+
         <section className="kpi-row">
           <div className="kpi" style={{ ["--accent" as any]: "var(--amber)" }}>
             <div className="kpi-label">Revenue</div>
@@ -1282,6 +1289,7 @@ export default function Dashboard() {
                   ["fuel_gallons", "Fuel Gallons"],
                   ["fuel_revenue", "Fuel Revenue"],
                   ["tax_collected", "Tax Collected"],
+                  ["closed", "Status"],
                 ].map(([key, label]) => (
                   <th
                     key={key}
@@ -1303,11 +1311,20 @@ export default function Dashboard() {
                     <td>{fmtNum(row.fuel_gallons, 1)}</td>
                     <td>{fmtMoney(row.fuel_revenue)}</td>
                     <td>{fmtMoney(row.tax_collected)}</td>
+                    <td>
+                      {row.closed ? (
+                        <span style={{ color: "var(--up)" }}>✓ Closed</span>
+                      ) : (
+                        <span style={{ color: "var(--amber)" }} title="Closing file not yet received - numbers can still move">
+                          ⏳ Live
+                        </span>
+                      )}
+                    </td>
                   </tr>
                 ))
               ) : (
                 <tr>
-                  <td colSpan={6} className="empty-note">
+                  <td colSpan={7} className="empty-note">
                     No days with activity in this range yet.
                   </td>
                 </tr>

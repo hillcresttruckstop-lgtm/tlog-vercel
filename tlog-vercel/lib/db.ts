@@ -768,6 +768,7 @@ export async function getDailyLedger(start: string, end: string) {
   );
 
   const fuelByDay = new Map((fuelRows as any[]).map((r) => [r.day, r]));
+  const closedDates = await getClosedDates();
   return (txnRows as any[])
     .map((r) => ({
       day: r.day as string,
@@ -776,8 +777,30 @@ export async function getDailyLedger(start: string, end: string) {
       tax_collected: Number(r.tax_collected),
       fuel_gallons: Number(fuelByDay.get(r.day)?.fuel_gallons ?? 0),
       fuel_revenue: Number(fuelByDay.get(r.day)?.fuel_revenue ?? 0),
+      // A day counts as CLOSED only once its dated closing file (e.g.
+      // "2026-09-24.486.2.xml.gz") has actually been ingested - not just
+      // whatever current.1/current.2 happened to capture so far. A day
+      // with no closing file yet (almost always just today) is still
+      // live and its totals can still move.
+      closed: closedDates.has(r.day as string),
     }))
     .sort((a, b) => a.day.localeCompare(b.day));
+}
+
+/** Which calendar days have their CLOSING file ingested (a dated archive
+ * like "2026-09-24.486.2.xml.gz" - the file VeriFone only writes once
+ * that day's period has actually closed), vs a day that so far only has
+ * data from the rolling current.1/current.2 snapshots. Matches strictly
+ * on the dated-archive filename shape so current.1/current.2 themselves
+ * never count as a closing file. */
+export async function getClosedDates(): Promise<Set<string>> {
+  const db = sql();
+  const rows = await db`
+    SELECT DISTINCT substring(filename from '^(\d{4}-\d{2}-\d{2})\.') AS day
+    FROM processed_files
+    WHERE filename ~ '^\d{4}-\d{2}-\d{2}\.\d+\.\d+\.xml\.gz$'
+  `;
+  return new Set((rows as any[]).map((r) => r.day as string));
 }
 
 /** Cards seen more than once in the range, by last 4 digits - a simple

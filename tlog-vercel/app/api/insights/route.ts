@@ -10,6 +10,7 @@ import {
   getPumpHealthFlags,
   getBasketAnalysis,
   getIdlePumpCost,
+  getClosedDates,
 } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
@@ -27,7 +28,7 @@ export async function GET(req: NextRequest) {
     req.nextUrl.searchParams.get("end")
   );
 
-  const [kpis, prevKpis, hourOfDay, dayOfWeek, dailyLedger, repeatCustomers, pumpFlags, basketAnalysis, idlePumpCost] =
+  const [kpis, prevKpis, hourOfDay, dayOfWeek, dailyLedger, repeatCustomers, pumpFlags, basketAnalysis, idlePumpCost, closedDates] =
     await Promise.all([
       getKpis(start, end),
       getPreviousPeriodKpis(start, end),
@@ -38,6 +39,7 @@ export async function GET(req: NextRequest) {
       getPumpHealthFlags(start, end),
       getBasketAnalysis(start, end),
       getIdlePumpCost(), // not range-scoped - always reflects current idle status regardless of the selected range
+      getClosedDates(),
     ]);
 
   const comparison = {
@@ -50,6 +52,10 @@ export async function GET(req: NextRequest) {
   const busiestHour = hourOfDay.reduce((best, h) => (h.revenue > (best?.revenue ?? -1) ? h : best), null as any);
   const busiestDay = dayOfWeek.reduce((best, d) => (d.revenue > (best?.revenue ?? -1) ? d : best), null as any);
 
+  // Central-time "today" string, same convention used everywhere else a
+  // calendar day is derived from a moment in time (see getTodayForecast).
+  const todayStr = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago" }).format(new Date());
+
   return NextResponse.json({
     range: { key: rangeKey, start, end },
     comparison,
@@ -60,9 +66,11 @@ export async function GET(req: NextRequest) {
     pump_flags: pumpFlags,
     basket_analysis: basketAnalysis,
     idle_pump_cost: idlePumpCost,
+    today_closed: closedDates.has(todayStr),
     highlights: {
       busiest_hour: busiestHour,
       busiest_day: busiestDay,
     },
   });
 }
+
