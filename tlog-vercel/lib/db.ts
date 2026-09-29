@@ -425,7 +425,7 @@ export async function getTransactionById(uniqueId: string) {
   };
 }
 
-export async function getLiveFeed(limit = 50) {
+export async function getLiveFeed(limit = 50, hoursBack: number | null = null) {
   const db = sql();
 
   // FIXED: this used to fire 2 separate queries PER ROW in a loop (lines,
@@ -440,10 +440,26 @@ export async function getLiveFeed(limit = 50) {
   // in exactly 2 batch queries (WHERE unique_id = ANY(...)), then grouping
   // them back onto their parent transaction in memory - 3 queries total,
   // regardless of how many transactions are in the page.
-  const rows = await db`
-    SELECT unique_id, trans_type, pos_num, tr_seq, date, cashier, total_with_tax
-    FROM transactions ORDER BY date DESC LIMIT ${limit}
-  `;
+  //
+  // FIXED: this used to always fetch just the most recent `limit` rows
+  // (60), with no time awareness at all - on a busy day (500+
+  // transactions), that only covered the last couple of hours, hiding
+  // everything from earlier that same morning. Now, when hoursBack is
+  // given, it fetches every transaction within that window instead of a
+  // fixed count - the feed naturally covers a full day whether that day
+  // had 100 transactions or 700. `limit` is kept as a hard safety cap
+  // either way, so a pathologically busy stretch can't return an
+  // unbounded result.
+  const rows = hoursBack
+    ? await db.query(
+        `SELECT unique_id, trans_type, pos_num, tr_seq, date, cashier, total_with_tax
+         FROM transactions WHERE date >= $1 ORDER BY date DESC LIMIT $2`,
+        [new Date(Date.now() - hoursBack * 3600 * 1000).toISOString(), limit]
+      )
+    : await db`
+        SELECT unique_id, trans_type, pos_num, tr_seq, date, cashier, total_with_tax
+        FROM transactions ORDER BY date DESC LIMIT ${limit}
+      `;
   const ids = rows.map((r) => r.unique_id as string);
 
   if (ids.length === 0) return [];
@@ -783,6 +799,43 @@ export async function getRepeatCustomers(start: string, end: string, minVisits =
     [start, end, minVisits, limit]
   );
   return (rows as any[]).map((r) => ({ ...r, total_spent: Number(r.total_spent) }));
+}
+
+/** Full detail for one repeat customer (by card last-4): every visit in
+ * this range (clickable through to the full receipt via the existing
+ * transaction lookup), plus their most frequently bought items - "what
+ * do they buy" answered from their own purchase history. Fetches lines
+ * only for THIS card's own transaction ids (not a join across payments,
+ * which could double-count on a split-tender sale) - the same safe
+ * two-step pattern as getLiveFeed. */
+export async function getCardDetail(cardLast4: string, start: string, end: string) {
+  const db = sql();
+  const visitRows = await db.query(
+    `SELECT DISTINCT t.unique_id, t.date, t.total_with_tax, t.trans_type
+     FROM transactions t JOIN transaction_payments p ON p.unique_id = t.unique_id
+     WHERE p.card_last4 = $1 AND t.date >= $2 AND t.date < $3
+     ORDER BY t.date DESC`,
+    [cardLast4, start, end]
+  );
+  const ids = (visitRows as any[]).map((r) => r.unique_id as string);
+
+  let topItems: any[] = [];
+  if (ids.length > 0) {
+    topItems = await db.query(
+      `SELECT description, category, COUNT(*)::int AS times, COALESCE(SUM(line_total), 0) AS total
+       FROM transaction_lines
+       WHERE unique_id = ANY($1::text[]) AND is_fuel = false AND description IS NOT NULL
+       GROUP BY description, category
+       ORDER BY times DESC, total DESC
+       LIMIT 8`,
+      [ids]
+    );
+  }
+
+  return {
+    visits: (visitRows as any[]).map((r) => ({ ...r, total_with_tax: Number(r.total_with_tax) })),
+    top_items: (topItems as any[]).map((r) => ({ ...r, total: Number(r.total), times: Number(r.times) })),
+  };
 }
 
 /** Flags any pump that's active elsewhere in the data but saw NO fuel

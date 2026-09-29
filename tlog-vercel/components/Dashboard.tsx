@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Chart as ChartJS,
   BarElement,
@@ -295,6 +295,9 @@ export default function Dashboard() {
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [status, setStatus] = useState<any>(null);
   const [smartInsights, setSmartInsights] = useState<any>(null);
+  const [expandedCard, setExpandedCard] = useState<string | null>(null);
+  const [cardDetail, setCardDetail] = useState<any>(null);
+  const [loadingCardDetail, setLoadingCardDetail] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<string | null>(null);
@@ -337,7 +340,7 @@ export default function Dashboard() {
       const [summaryRes, insightsRes, feedRes, statusRes, smartRes] = await Promise.all([
         fetch(`/api/summary?${rangeQuery}`).then((r) => r.json()),
         fetch(`/api/insights?${rangeQuery}`).then((r) => r.json()),
-        fetch(`/api/live-feed?limit=60`).then((r) => r.json()),
+        fetch(`/api/live-feed?hours=24`).then((r) => r.json()),
         fetch(`/api/status`).then((r) => r.json()),
         fetch(`/api/smart-insights`).then((r) => r.json()),
       ]);
@@ -422,6 +425,31 @@ export default function Dashboard() {
       setResetConfirmText("");
       setTimeout(() => setSyncResult(null), 10000);
     }
+  }
+
+  async function toggleCardDetail(cardLast4: string) {
+    if (expandedCard === cardLast4) {
+      setExpandedCard(null);
+      setCardDetail(null);
+      return;
+    }
+    setExpandedCard(cardLast4);
+    setCardDetail(null);
+    setLoadingCardDetail(true);
+    try {
+      const rangeQuery = range === "custom" ? `range=custom&start=${customStart}&end=${customEnd}` : `range=${range}`;
+      const res = await fetch(`/api/customer-detail?card=${encodeURIComponent(cardLast4)}&${rangeQuery}`);
+      const data = await res.json();
+      if (res.ok) setCardDetail(data);
+    } finally {
+      setLoadingCardDetail(false);
+    }
+  }
+
+  async function openReceipt(uniqueId: string) {
+    const res = await fetch(`/api/transaction?id=${encodeURIComponent(uniqueId)}`);
+    const txn = await res.json();
+    if (res.ok) setSelectedTxn(txn);
   }
 
   useEffect(() => {
@@ -1336,12 +1364,53 @@ export default function Dashboard() {
             <tbody>
               {insights?.repeat_customers?.length ? (
                 insights.repeat_customers.map((c: any) => (
-                  <tr key={c.card_last4}>
-                    <td>•••• {c.card_last4}</td>
-                    <td>{fmtNum(c.visits)}</td>
-                    <td>{fmtMoney(c.total_spent)}</td>
-                    <td>{new Date(c.last_seen).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}</td>
-                  </tr>
+                  <Fragment key={c.card_last4}>
+                    <tr onClick={() => toggleCardDetail(c.card_last4)} style={{ cursor: "pointer" }}>
+                      <td>{expandedCard === c.card_last4 ? "▾ " : "▸ "}•••• {c.card_last4}</td>
+                      <td>{fmtNum(c.visits)}</td>
+                      <td>{fmtMoney(c.total_spent)}</td>
+                      <td>{new Date(c.last_seen).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}</td>
+                    </tr>
+                    {expandedCard === c.card_last4 && (
+                      <tr>
+                        <td colSpan={4} style={{ padding: 0 }}>
+                          <div className="card-detail-panel">
+                            {loadingCardDetail ? (
+                              <div className="empty-note">Loading…</div>
+                            ) : cardDetail ? (
+                              <>
+                                {cardDetail.top_items.length > 0 && (
+                                  <div className="card-detail-section">
+                                    <div className="card-detail-heading">What they buy</div>
+                                    <div className="card-detail-items">
+                                      {cardDetail.top_items.map((it: any, i: number) => (
+                                        <span className="card-detail-chip" key={i}>
+                                          {it.description} <b>×{it.times}</b>
+                                        </span>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                                <div className="card-detail-section">
+                                  <div className="card-detail-heading">Visit history ({cardDetail.visits.length})</div>
+                                  <div className="card-detail-visits">
+                                    {cardDetail.visits.map((v: any) => (
+                                      <div className="card-detail-visit-row" key={v.unique_id} onClick={() => openReceipt(v.unique_id)}>
+                                        <span>{new Date(v.date).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}</span>
+                                        <span className="mono">{fmtMoney(v.total_with_tax)}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </>
+                            ) : (
+                              <div className="empty-note">Nothing found.</div>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))
               ) : (
                 <tr>
